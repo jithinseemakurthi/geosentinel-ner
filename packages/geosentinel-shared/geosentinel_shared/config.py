@@ -131,6 +131,20 @@ class Settings(BaseSettings):
     # Textbee sends via an Android phone/SIM and supports dynamic messages.
     TEXTBEE_API_URL: str = "https://api.textbee.dev/api/v1/gateway/send-sms"
     TEXTBEE_API_KEY: Optional[str] = None
+    # ----- Free alert channels (no paid SMS provider required) -----
+    # Comma-separated subset of: whatsapp, telegram, push.
+    # Delivered alongside SMS on every rainfall alert / NE digest.
+    ALERT_FREE_CHANNELS: str = ""
+    # whatsapp: CallMeBot free API (one-time per-phone activation, see README)
+    CALLMEBOT_API_URL: str = "https://api.callmebot.com/whatsapp.php"
+    CALLMEBOT_API_KEY: Optional[str] = None
+    # telegram: official Telegram Bot API (@BotFather token + chat IDs)
+    TELEGRAM_API_URL: str = "https://api.telegram.org"
+    TELEGRAM_BOT_TOKEN: Optional[str] = None
+    TELEGRAM_CHAT_IDS: str = ""
+    # push: ntfy.sh topics (install https://ntfy.sh app, subscribe to topic)
+    NTFY_SERVER_URL: str = "https://ntfy.sh"
+    NTFY_TOPICS: str = ""
     FIREBASE_PROJECT_ID: Optional[str] = None
     FIREBASE_PRIVATE_KEY: Optional[str] = None
     FIREBASE_CLIENT_EMAIL: Optional[str] = None

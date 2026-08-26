@@ -181,21 +181,53 @@ templates and verified recipient numbers. Set
 actual weather digest requires a paid Twilio account, where
 `TWILIO_TRIAL_TEMPLATE` must be left blank.
 
+### Free alert channels — no SMS provider or Android phone needed
+
+GeoSentinel can deliver every rainfall alert and the 30-minute NE digest
+through **free** channels alongside (or instead of) SMS:
+
+| Channel | Setup | Recipient needs |
+|---------|-------|-----------------|
+| WhatsApp (CallMeBot) | From the recipient phone's WhatsApp, send `I allow callmebot to send me messages` to **+34 644 66 32 62**, then copy the API key it replies with into `CALLMEBOT_API_KEY` | Nothing further |
+| Telegram | Create a bot with [@BotFather](https://t.me/BotFather), set `TELEGRAM_BOT_TOKEN`; recipients press Start on your bot and their chat IDs go in `TELEGRAM_CHAT_IDS` | Telegram app |
+| Push (ntfy.sh) | Install the [ntfy app](https://ntfy.sh), subscribe to a random private topic (e.g. `geo-alerts-x7f3k9`), list topics in `NTFY_TOPICS` | ntfy app |
+
+Enable them with one variable:
+
+```bash
+ALERT_FREE_CHANNELS=whatsapp,telegram,push
+```
+
+Every rainfall alert (`POST /api/v1/alerts/rainfall`) and scheduled digest is
+then fanned out across all enabled channels automatically — one failing
+channel never blocks the others. Verify with an admin token:
+
+```bash
+# Which channels are enabled/configured?
+curl http://localhost:8006/api/v1/free-channels -H "Authorization: Bearer <admin-token>"
+
+# Send one test message through all enabled channels
+curl -X POST http://localhost:8006/api/v1/test/free-channels -H "Authorization: Bearer <admin-token>"
+```
+
+These channels are free for personal use; for public-scale deployments use a
+proper SMS provider (MSG91 DLT templates etc.) as the primary channel.
+
 ### Real weather SMS without a paid API: your Android phone
 
-[Textbee](https://github.com/textbee/textbee) is a free, open-source SMS
-gateway that sends through your own Android phone and SIM. Install its Android
-app, grant SMS permission, register the device, and generate its free API key.
-Then set:
+[Textbee](https://github.com/textbee/textbee) sends real SMS through your own
+Android phone and SIM. Install its Android app, grant SMS permission,
+register the device, and generate its API key. Then set:
 
 ```bash
 SMS_PROVIDER=textbee
-TEXTBEE_API_KEY=<key from Textbee>
+TEXTBEE_API_KEY=<key from textbee dashboard>
 ```
 
 Keep the phone powered, connected to the internet, and with an active SMS plan.
-This provider sends the actual 30-minute GeoSentinel weather digest; your
-mobile carrier's normal SMS terms still apply.
+If delivery fails, GeoSentinel now surfaces textbee's HTTP response verbatim in
+the error/logs (e.g. device offline or unregistered), so setup problems are
+easy to spot. Your mobile carrier's normal SMS terms still apply.
 
 ## ML Models (roadmap)
 

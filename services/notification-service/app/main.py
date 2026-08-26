@@ -132,7 +132,14 @@ class SMSProvider:
                     headers={"x-api-key": settings.TEXTBEE_API_KEY},
                     json={"recipients": [to], "message": message},
                 )
-            response.raise_for_status()
+            # Surface the provider's response body so setup problems (device
+            # offline, unregistered, quota exceeded) are diagnosable from logs.
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"TextBee returned HTTP {response.status_code}: {response.text[:200]!r}. "
+                    "Check that your Android device is registered and online in the "
+                    "textbee dashboard and the API key is valid."
+                )
             body = response.json()
             return {
                 "status": "sent",
@@ -247,6 +254,189 @@ push_provider = PushProvider()
 whatsapp_provider = WhatsAppProvider()
 email_provider = EmailProvider()
 cap_provider = CAPProvider()
+
+
+# -----------------------------------------------------------------------------
+# Free alert channels (zero-cost alternatives to paid SMS providers)
+#
+# These need no SMS gateway account, no DLT registration, and no spare Android
+# phone running 24/7:
+#   whatsapp -> CallMeBot free WhatsApp API (one-time activation per phone)
+#   telegram -> official Telegram Bot API (bot token + chat IDs)
+#   push     -> ntfy.sh push notifications (subscribe to a topic in the app)
+# -----------------------------------------------------------------------------
+class FreeChannelDispatcher:
+    """Delivers alerts via free channels configured in ALERT_FREE_CHANNELS."""
+
+    FREE_CHANNELS = ("whatsapp", "telegram", "push")
+    _NTFY_TOPIC_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+    @property
+    def _enabled(self) -> set:
+        """Parsed from settings on every access so config changes apply live."""
+        return {
+            c.strip().lower()
+            for c in (settings.ALERT_FREE_CHANNELS or "").split(",")
+            if c.strip()
+        }
+
+    @property
+    def active(self) -> List[str]:
+        """Enabled channels that GeoSentinel knows how to deliver."""
+        return [c for c in self.FREE_CHANNELS if c in self._enabled]
+
+    @property
+    def unknown_channels(self) -> List[str]:
+        return sorted(self._enabled - set(self.FREE_CHANNELS))
+
+    async def send_whatsapp(self, phone: str, message: str) -> Dict[str, Any]:
+        """Send a WhatsApp message through the CallMeBot free API."""
+        if not settings.CALLMEBOT_API_KEY:
+            raise RuntimeError("CALLMEBOT_API_KEY is not configured")
+        to = _validate_phone(phone)
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.get(
+                settings.CALLMEBOT_API_URL,
+                params={
+                    "phone": to,
+                    "apikey": settings.CALLMEBOT_API_KEY,
+                    "text": message[:900],
+                },
+            )
+        text = response.text or ""
+        if response.status_code != 200 or "MESSAGE NOT SENT" in text.upper():
+            raise RuntimeError(
+                f"CallMeBot rejected message (HTTP {response.status_code}): {text[:160]!r}. "
+                "Confirm the recipient activated the bot once and the API key matches."
+            )
+        return {
+            "status": "sent",
+            "channel": "whatsapp",
+            "provider_message_id": f"cmb_{uuid4().hex[:10]}",
+        }
+
+    async def send_telegram(self, chat_id: str, message: str) -> Dict[str, Any]:
+        """Send a Telegram message via the official Bot API."""
+        if not settings.TELEGRAM_BOT_TOKEN:
+            raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
+        chat_id = chat_id.strip()
+        if not chat_id:
+            raise ValueError("Telegram chat id must not be empty")
+        url = (
+            f"{settings.TELEGRAM_API_URL.rstrip('/')}"
+            f"/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
+        )
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(
+                url,
+                json={
+                    "chat_id": chat_id,
+                    "text": message[:4000],
+                    "disable_web_page_preview": True,
+                },
+            )
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        if response.status_code != 200 or not body.get("ok"):
+            raise RuntimeError(
+                f"Telegram rejected message (HTTP {response.status_code}): "
+                f"{str(body)[:160]!r}. Verify TELEGRAM_BOT_TOKEN and that the "
+                "recipient has pressed Start on the bot."
+            )
+        message_id = (body.get("result") or {}).get("message_id")
+        return {
+            "status": "sent",
+            "channel": "telegram",
+            "provider_message_id": str(message_id) if message_id is not None else None,
+        }
+
+    async def send_push(self, topic: str, message: str, title: Optional[str] = None) -> Dict[str, Any]:
+        """Post an ntfy.sh push notification; recipients subscribe to the topic."""
+        topic_name = topic.strip().strip("/")
+        if not self._NTFY_TOPIC_RE.match(topic_name):
+            raise ValueError(
+                "ntfy topic must be 1-64 characters of letters/digits/_/-"
+            )
+        headers = {"Title": title} if title else {}
+        url = f"{settings.NTFY_SERVER_URL.rstrip('/')}/{topic_name}"
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(url, content=message.encode("utf-8"), headers=headers)
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"ntfy.sh rejected message (HTTP {response.status_code}): {response.text[:160]!r}"
+            )
+        return {
+            "status": "sent",
+            "channel": "push",
+            "provider_message_id": f"ntfy_{uuid4().hex[:10]}",
+        }
+
+
+free_dispatcher = FreeChannelDispatcher()
+
+
+def _phones_csv(raw: str, setting_name: str) -> List[str]:
+    phones = [_validate_phone(p.strip()) for p in raw.split(",") if p.strip()]
+    if not phones:
+        raise RuntimeError(f"{setting_name} is not configured")
+    return phones
+
+
+async def deliver_via_free_channels(
+    message: str,
+    title: Optional[str] = None,
+    phones_override: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Fan an alert out across every enabled free channel.
+
+    Each delivery is attempted independently — one failing channel never
+    blocks the others. Failures are logged and returned, not raised.
+    """
+    results: List[Dict[str, Any]] = []
+
+    async def _attempt(label: str, coro) -> None:
+        try:
+            outcome = await coro
+            results.append({"recipient": label, **outcome})
+        except (RuntimeError, ValueError, httpx.HTTPError) as exc:
+            logger.warning("free_channel_delivery_failed", error=str(exc))
+            results.append({"recipient": label, "status": "failed", "error": str(exc)})
+
+    if "whatsapp" in free_dispatcher.active:
+        try:
+            phones = phones_override if phones_override is not None else _phones_csv(
+                settings.ALERT_RECIPIENT_PHONES, "ALERT_RECIPIENT_PHONES"
+            )
+        except RuntimeError as exc:
+            results.append({"channel": "whatsapp", "status": "failed", "error": str(exc)})
+        else:
+            for phone in phones:
+                await _attempt(phone[:6] + "****@whatsapp", free_dispatcher.send_whatsapp(phone, message))
+
+    if "telegram" in free_dispatcher.active:
+        chat_ids = [c.strip() for c in (settings.TELEGRAM_CHAT_IDS or "").split(",") if c.strip()]
+        if not chat_ids:
+            results.append({
+                "channel": "telegram",
+                "status": "failed",
+                "error": "TELEGRAM_CHAT_IDS is not configured",
+            })
+        for chat_id in chat_ids:
+            await _attempt(chat_id + "@telegram", free_dispatcher.send_telegram(chat_id, message))
+
+    if "push" in free_dispatcher.active:
+        topics = [t.strip() for t in (settings.NTFY_TOPICS or "").split(",") if t.strip()]
+        if not topics:
+            results.append({"channel": "push", "status": "failed", "error": "NTFY_TOPICS is not configured"})
+        for topic in topics:
+            await _attempt(topic + "@push", free_dispatcher.send_push(topic, message, title=title))
+
+    unknown = free_dispatcher.unknown_channels
+    if unknown:
+        logger.warning("unknown_free_channels_ignored", channels=unknown)
+    return results
 
 
 # Representative NER locations/abbreviations come from the shared package.
@@ -499,9 +689,15 @@ async def send_northeast_digest() -> Dict[str, Any]:
     digest_status["last_run_at"] = datetime.now(timezone.utc).isoformat()
     try:
         message, summaries = await build_northeast_digest()
-        recipients = _digest_recipients()
+        try:
+            sms_recipients = _digest_recipients()
+        except RuntimeError:
+            if not free_dispatcher.active:
+                raise
+            sms_recipients = []
+            logger.info("northeast_digest_sms_recipients_empty_using_free_channels")
         results = []
-        for phone in recipients:
+        for phone in sms_recipients:
             try:
                 result = await sms_provider.send(phone, message, settings.SMS_TEMPLATE_ID_ALERT)
                 results.append({
@@ -512,6 +708,7 @@ async def send_northeast_digest() -> Dict[str, Any]:
             except (RuntimeError, httpx.HTTPError) as exc:
                 logger.error("northeast_digest_sms_failed", error=str(exc))
                 results.append({"phone": phone[:6] + "****", "status": "failed", "error": str(exc)})
+        results.extend(await deliver_via_free_channels(message, title="GeoSentinel NER update"))
         delivered = sum(result["status"] in {"sent", "simulated"} for result in results)
         statuses = {result["status"] for result in results}
         overall_status = "simulated" if statuses == {"simulated"} else "sent" if delivered else "failed"
@@ -619,7 +816,8 @@ async def send_rainfall_alert(
     request: RainfallAlertRequest,
     principal: Principal = Depends(get_principal),
 ):
-    """Send an SMS when observed/forecast rain or slope activity crosses a threshold."""
+    """Send an SMS (and any enabled free channels) when observed/forecast rain
+    or slope activity crosses a threshold."""
     message = _rainfall_alert_message(request)
     if message is None:
         return {
@@ -629,7 +827,18 @@ async def send_rainfall_alert(
             "sent": 0,
         }
 
-    recipients = _configured_recipients()
+    try:
+        recipients = _configured_recipients()
+    except RuntimeError:
+        recipients = []
+        if not free_dispatcher.active:
+            raise HTTPException(
+                status_code=503,
+                detail="No ALERT_RECIPIENT_PHONES configured and no free alert "
+                       "channels enabled (ALERT_FREE_CHANNELS)",
+            )
+        logger.info("rainfall_alert_skipping_sms_no_recipients")
+
     results = []
     for phone in recipients:
         try:
@@ -646,6 +855,10 @@ async def send_rainfall_alert(
         except (RuntimeError, httpx.HTTPError) as exc:
             logger.error("rainfall_sms_failed", alert_id=str(request.alert_id), error=str(exc))
             results.append({"phone": phone[:6] + "****", "status": "failed", "error": str(exc)})
+
+    results.extend(
+        await deliver_via_free_channels(message, title=f"GeoSentinel rainfall alert - {request.location}")
+    )
 
     sent = sum(1 for result in results if result["status"] == "sent")
     logger.info(
@@ -736,6 +949,44 @@ async def test_push(req: TestPushRequest):
 async def test_whatsapp(req: TestWhatsAppRequest):
     result = await whatsapp_provider.send_template(req.phone, req.template, "en", req.params)
     return result
+
+
+@app.get(f"{settings.API_PREFIX}/free-channels", dependencies=[Depends(require_role("admin"))])
+async def free_channels_state():
+    """Show which free alert channels are enabled and correctly configured."""
+    def _state(channel: str) -> Dict[str, Any]:
+        checks = {
+            "whatsapp": bool(settings.CALLMEBOT_API_KEY) and bool(settings.ALERT_RECIPIENT_PHONES),
+            "telegram": bool(settings.TELEGRAM_BOT_TOKEN) and bool(settings.TELEGRAM_CHAT_IDS),
+            "push": bool(settings.NTFY_TOPICS),
+        }
+        return {"enabled": channel in free_dispatcher.active, "configured": checks[channel]}
+
+    return {
+        "channels": {c: _state(c) for c in FreeChannelDispatcher.FREE_CHANNELS},
+        "unknown_channels": free_dispatcher.unknown_channels,
+    }
+
+
+@app.post(f"{settings.API_PREFIX}/test/free-channels", dependencies=[Depends(require_role("admin"))])
+async def test_free_channels():
+    """Send one test message through every enabled free channel."""
+    if not free_dispatcher.active:
+        raise HTTPException(
+            status_code=503,
+            detail="No free channels enabled. Set ALERT_FREE_CHANNELS "
+                   "(e.g. whatsapp,telegram,push) and the per-channel credentials.",
+        )
+    results = await deliver_via_free_channels(
+        "GeoSentinel test message: your free alert channel is working."
+    )
+    delivered = sum(1 for r in results if r["status"] == "sent")
+    return {
+        "status": "sent" if delivered else "failed",
+        "delivered": delivered,
+        "total": len(results),
+        "results": results,
+    }
 
 
 # -----------------------------------------------------------------------------
