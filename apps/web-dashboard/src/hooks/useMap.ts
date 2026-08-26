@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import maplibregl from 'maplibre-gl'
 import { DEFAULT_CENTER } from '@/lib/districts'
 
-const MAP_STYLE = 'https://demotiles.maplibre.org/style.json'
+// OpenFreeMap: free, keyless vector tiles with worldwide detail at all zooms.
+// (MapLibre's demotiles only render meaningfully below ~z6, which made detail
+// modals show a featureless background.) Dark variant matches the dashboard.
+const MAP_STYLE = 'https://tiles.openfreemap.org/styles/dark'
 
 export interface UseMapOptions {
   containerRef: React.RefObject<HTMLDivElement>
