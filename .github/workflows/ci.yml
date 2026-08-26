@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-lint-test:
+    name: Python lint & tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+
+      - name: Create virtual environment
+        run: uv venv .venv --python 3.11
+
+      - name: Install dependencies
+        run: uv pip install -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: .venv/bin/ruff check .
+
+      - name: Tests (pytest)
+        run: .venv/bin/pytest -q --cov=geosentinel_shared --cov=services --cov-report=term
+
+  frontend-build-test:
+    name: Frontend build & unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web-dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web-dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Unit tests (vitest)
+        run: npm run test:unit -- --run
+
+      - name: Build
+        run: npm run build
+
+  compose-validate:
+    name: Validate docker-compose.yml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate compose file
+        run: |
+          cp .env.example .env
+          docker compose config --quiet

@@ -1,0 +1,26 @@
+[project]
+name = "geosentinel-ner-workspace"
+version = "0.1.0"
+description = "GeoSentinel-NER monorepo tooling configuration (tests, lint)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"
+filterwarnings = [
+    "ignore::DeprecationWarning:passlib.*",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["services/textbelt"]
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes, I isort. Kept deliberately focused so existing
+# code passes while still catching real defects.
+select = ["E", "W", "F", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["geosentinel_shared"]

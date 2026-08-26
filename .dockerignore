@@ -1,0 +1,72 @@
+# =============================================================================
+# GeoSentinel-NER .dockerignore
+# Keeps Docker build contexts small and prevents secrets from leaking into
+# images. Applies to builds with the repository root as context.
+# =============================================================================
+
+# --- Secrets & local config (NEVER bake into images) ---
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.crt
+secrets/
+gcp-service-account*.json
+aws-credentials*
+firebase-adminsdk*.json
+
+# --- Git & CI ---
+.git/
+.github/
+.gitignore
+
+# --- Docs ---
+docs/
+README.md
+LICENSE
+
+# --- Data & ML artifacts (large / local-only) ---
+data/rasters/
+data/samples/
+data/seeds/local/
+ml/checkpoints/
+ml/.mlflow/
+*.pt
+*.pkl
+*.h5
+*.onnx
+*.parquet
+*.arrow
+
+# --- Python cruft ---
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/*.egg-info/
+**/htmlcov/
+**/.coverage
+
+# --- Node / web ---
+**/node_modules/
+apps/web-dashboard/dist/
+apps/web-dashboard/.vite/
+apps/web-dashboard/coverage/
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# --- Logs & backups ---
+**/*.log
+logs/
+*.sql.gz
+backup_*.sql
+*.dump
+
+# --- Docker itself ---
+docker-compose.override.yml

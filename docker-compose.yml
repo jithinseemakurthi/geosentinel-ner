@@ -1,0 +1,502 @@
+# =============================================================================
+# GeoSentinel-NER local dev stack.
+#
+# All credentials are read from the host .env file (see .env.example).
+# If a required variable is missing, the affected service fails fast at start
+# — there are no silent default passwords.
+# =============================================================================
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+    tag: "{{.Name}}"
+
+x-restart: &default-restart
+  restart: unless-stopped
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL + PostGIS (Primary relational + spatial data)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: geosentinel-postgres
+    <<: *default-restart
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-geosentinel}
+      POSTGRES_USER: ${POSTGRES_USER:-geosentinel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Migrations are auto-applied on first init; for subsequent runs use
+      # `make migrate` (idempotent) or `alembic upgrade head`.
+      - ./data/schemas/migrations:/docker-entrypoint-initdb.d:ro
+    ports:
+      # Bound to loopback only: never expose raw DB ports to the LAN.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-geosentinel} -d ${POSTGRES_DB:-geosentinel}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # TimescaleDB (Sensor time-series data)
+  # ---------------------------------------------------------------------------
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: geosentinel-timescaledb
+    <<: *default-restart
+    environment:
+      POSTGRES_DB: ${TIMESCALE_DB:-geosentinel_ts}
+      POSTGRES_USER: ${POSTGRES_USER:-geosentinel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${TIMESCALE_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-geosentinel} -d ${TIMESCALE_DB:-geosentinel_ts}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Redis (Cache, Celery broker, rate limiting)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: geosentinel-redis
+    <<: *default-restart
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --requirepass
+      - ${REDIS_PASSWORD:-}
+    environment:
+      # Official redis-cli auth env var — keeps the password out of the
+      # healthcheck command line (not visible in `docker inspect` or ps).
+      REDISCLI_AUTH: ${REDIS_PASSWORD:-}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # MinIO (S3-compatible object storage)
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: geosentinel-minio
+    <<: *default-restart
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "127.0.0.1:${MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Kafka + Zookeeper (Optional - enable via `--profile kafka`)
+  # ---------------------------------------------------------------------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: geosentinel-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - geosentinel-net
+    profiles:
+      - kafka
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: geosentinel-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "127.0.0.1:${KAFKA_PORT:-9092}:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - geosentinel-net
+    profiles:
+      - kafka
+
+  # ---------------------------------------------------------------------------
+  # MLflow (Experiment tracking + model registry)
+  # ---------------------------------------------------------------------------
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.11.0
+    container_name: geosentinel-mlflow
+    command: >
+      mlflow server
+        --host 0.0.0.0
+        --port 5000
+        --backend-store-uri postgresql://${POSTGRES_USER:-geosentinel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-geosentinel}
+        --default-artifact-root s3://${MINIO_BUCKET:-geosentinel}/mlflow
+        --artifacts-destination s3://${MINIO_BUCKET:-geosentinel}/mlflow
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+    ports:
+      - "127.0.0.1:${MLFLOW_PORT:-5000}:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # TiTiler (Cloud-optimized GeoTIFF tile server)
+  # ---------------------------------------------------------------------------
+  titiler:
+    image: developmentseed/titiler:0.12.0
+    container_name: geosentinel-titiler
+    environment:
+      # Host port 8104 avoids clashing with gis-service (8004).
+      TITILER_API_URL: http://localhost:${TITILER_PORT:-8104}
+      GDAL_CACHEMAX: 512
+      VSI_CACHE: "TRUE"
+      VSI_CACHE_SIZE: "100000000"
+    ports:
+      - "127.0.0.1:${TITILER_PORT:-8104}:8000"
+    volumes:
+      - ./data/rasters:/data:ro
+      - minio_data:/mnt/minio
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # GeoServer (Optional - enable via `--profile geoserver`)
+  # ---------------------------------------------------------------------------
+  geoserver:
+    image: kartoza/geoserver:latest
+    container_name: geosentinel-geoserver
+    environment:
+      GEOSERVER_ADMIN_USER: ${GEOSERVER_ADMIN_USER:-admin}
+      GEOSERVER_ADMIN_PASSWORD: ${GEOSERVER_ADMIN_PASSWORD:?GEOSERVER_ADMIN_PASSWORD must be set}
+      JAVA_OPTS: "-Xms2g -Xmx4g"
+    ports:
+      - "127.0.0.1:${GEOSERVER_PORT:-8080}:8080"
+    volumes:
+      - geoserver_data:/opt/geoserver/data_dir
+    networks:
+      - geosentinel-net
+    profiles:
+      - geoserver
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Prometheus + Grafana (Observability)
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: geosentinel-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+    volumes:
+      - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: geosentinel-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./infra/monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./infra/monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3001}:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Jaeger (Distributed tracing)
+  # ---------------------------------------------------------------------------
+  jaeger:
+    image: jaegertracing/all-in-one:1.50
+    container_name: geosentinel-jaeger
+    ports:
+      - "127.0.0.1:${JAEGER_UI_PORT:-16686}:16686"
+      - "127.0.0.1:${JAEGER_AGENT_PORT:-6831}:6831/udp"
+      - "127.0.0.1:${JAEGER_OTLP_PORT:-14268}:14268"
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Application services — built from ./services/<name>/Dockerfile
+  # Each service reads its config from the host .env file via env_file.
+  # Build context is the repo root so Dockerfiles can COPY the shared package
+  # (services/<name>/Dockerfile expects to be built from the repository root).
+  # Internal services are bound to loopback only — they have no auth of their
+  # own and must never be reachable from the LAN.
+  # ---------------------------------------------------------------------------
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    container_name: geosentinel-api-gateway
+    <<: *default-restart
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-geosentinel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-geosentinel}
+      TIMESCALE_URL: postgresql://${POSTGRES_USER:-geosentinel}:${POSTGRES_PASSWORD}@timescaledb:5432/${TIMESCALE_DB:-geosentinel_ts}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  data-ingestion:
+    build:
+      context: .
+      dockerfile: services/data-ingestion/Dockerfile
+    container_name: geosentinel-data-ingestion
+    <<: *default-restart
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-geosentinel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-geosentinel}
+      TIMESCALE_URL: postgresql://${POSTGRES_USER:-geosentinel}:${POSTGRES_PASSWORD}@timescaledb:5432/${TIMESCALE_DB:-geosentinel_ts}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379/0
+    ports:
+      - "127.0.0.1:8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  ml-engine:
+    build:
+      context: .
+      dockerfile: services/ml-engine/Dockerfile
+    container_name: geosentinel-ml-engine
+    <<: *default-restart
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-geosentinel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-geosentinel}
+      TIMESCALE_URL: postgresql://${POSTGRES_USER:-geosentinel}:${POSTGRES_PASSWORD}@timescaledb:5432/${TIMESCALE_DB:-geosentinel_ts}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      DATA_INGESTION_URL: http://data-ingestion:8001
+    ports:
+      - "127.0.0.1:8002:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  alert-engine:
+    build:
+      context: .
+      dockerfile: services/alert-engine/Dockerfile
+    container_name: geosentinel-alert-engine
+    <<: *default-restart
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-geosentinel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-geosentinel}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379/0
+    ports:
+      - "127.0.0.1:8003:8003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  gis-service:
+    build:
+      context: .
+      dockerfile: services/gis-service/Dockerfile
+    container_name: geosentinel-gis-service
+    <<: *default-restart
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-geosentinel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-geosentinel}
+    ports:
+      - "127.0.0.1:8004:8004"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  report-service:
+    build:
+      context: .
+      dockerfile: services/report-service/Dockerfile
+    container_name: geosentinel-report-service
+    <<: *default-restart
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-geosentinel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-geosentinel}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+    ports:
+      - "127.0.0.1:8005:8005"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  textbelt:
+    build:
+      context: ./services/textbelt
+      dockerfile: Dockerfile
+    container_name: geosentinel-textbelt
+    <<: *default-restart
+    env_file:
+      - .env
+    environment:
+      PORT: 9090
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: services/notification-service/Dockerfile
+    container_name: geosentinel-notification-service
+    <<: *default-restart
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-geosentinel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-geosentinel}
+      # Defaults to a safe demo provider; override SMS_PROVIDER in .env to use
+      # textbelt, msg91, or twilio when credentials are available.
+      SMS_PROVIDER: ${SMS_PROVIDER:-mock}
+      TEXTBELT_URL: http://textbelt:9090/intl
+      DATA_INGESTION_URL: http://data-ingestion:8001
+    ports:
+      - "127.0.0.1:8006:8006"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      textbelt:
+        condition: service_started
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+  web-dashboard:
+    build:
+      context: ./apps/web-dashboard
+      dockerfile: Dockerfile
+      # Vite inlines VITE_* variables at BUILD time — runtime env has no effect.
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000/api/v1}
+    container_name: geosentinel-web-dashboard
+    <<: *default-restart
+    ports:
+      - "127.0.0.1:${WEB_PORT:-3000}:80"
+    depends_on:
+      - api-gateway
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+
+volumes:
+  postgres_data:
+  timescaledb_data:
+  redis_data:
+  minio_data:
+  geoserver_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  geosentinel-net:
+    driver: bridge

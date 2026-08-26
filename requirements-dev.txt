@@ -1,0 +1,23 @@
+# Development/test dependencies for the GeoSentinel-NER Python workspace.
+# Install with:  pip install -r requirements-dev.txt
+# Covers the shared package plus light service modules under test.
+ruff>=0.3
+pytest>=7.4
+pytest-asyncio>=0.23
+pytest-cov>=4.1
+httpx>=0.26
+fastapi>=0.109
+pydantic>=2.6
+pydantic-settings>=2.2
+python-dotenv>=1.0
+sqlalchemy[asyncio]>=2.0
+geoalchemy2>=0.15
+shapely>=2.0
+geojson>=2.5
+structlog>=24.1
+python-json-logger>=2.0
+passlib[bcrypt]>=1.7
+bcrypt==4.0.1
+python-jose[cryptography]>=3.3
+email-validator>=2.1
+apscheduler>=3.10

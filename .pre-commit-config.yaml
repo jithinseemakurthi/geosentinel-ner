@@ -1,0 +1,23 @@
+# GeoSentinel-NER pre-commit hooks — run `pre-commit install` once after cloning.
+# Focused on fast, deterministic checks that match CI.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: \.(log|md)$
+      - id: end-of-file-fixer
+        exclude: \.(log|md)$
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.3.4
+    hooks:
+      - id: ruff
+        args: [--fix]

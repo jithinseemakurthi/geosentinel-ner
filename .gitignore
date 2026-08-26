@@ -1,0 +1,109 @@
+# =============================================================================
+# GeoSentinel-NER .gitignore
+# =============================================================================
+
+# --- Secrets & local config (NEVER commit) ---
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.crt
+secrets/
+gcp-service-account*.json
+aws-credentials*
+firebase-adminsdk*.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+dist/
+build/
+*.whl
+.venv/
+venv/
+
+# Poetry — lockfiles SHOULD be committed for reproducible builds.
+# (Do not add poetry.lock here.)
+
+# --- Node / Web ---
+node_modules/
+.pnp
+.pnp.js
+.next/
+out/
+dist/
+build/
+.vite/
+*.local
+coverage/
+.nyc_output/
+
+# --- Flutter / Dart (mobile) ---
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+*.iml
+.idea/
+.vscode/
+*.log
+android/.gradle/
+android/app/build/
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+
+# --- Data & ML ---
+data/rasters/
+data/samples/raw/
+data/seeds/local/
+ml/checkpoints/
+ml/.mlflow/
+*.pt
+*.pkl
+*.h5
+*.onnx
+*.parquet
+*.arrow
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Backups / dumps ---
+*.sql.gz
+backup_*.sql
+*.dump
+
+# --- Docker / compose ---
+docker-compose.override.yml
+
+# --- Infra / Terraform ---
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+!example.tfvars
+
+# --- Logs ---
+*.log
+logs/
