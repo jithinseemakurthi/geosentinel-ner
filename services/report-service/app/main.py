@@ -2,8 +2,9 @@
 GeoSentinel-NER Report Service
 Citizen report ingestion, CV triage, and verification workflow.
 """
+import json
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
@@ -22,6 +23,9 @@ from geosentinel_shared import (
     verify_token,
 )
 from pydantic import BaseModel
+from sqlalchemy import text
+
+UTC = timezone.utc
 
 configure_logging()
 logger = get_logger(__name__)
@@ -122,6 +126,67 @@ class MediaStorage:
 
 
 media_storage = MediaStorage()
+
+# -----------------------------------------------------------------------------
+# DB helpers — powerful report querying (used to surface live-engine problems)
+# -----------------------------------------------------------------------------
+_REPORT_SELECT = text(
+    """
+    SELECT id, report_code, reporter_name, reporter_phone,
+           report_type, severity, description, accuracy_m, altitude_m,
+           village_id, road_id, status, priority_score, cv_classification,
+           cv_confidence, cv_inference_at, verified_by, verified_at,
+           verification_notes, assigned_to, resolved_at, resolution_notes,
+           metadata, created_at, updated_at,
+           ST_AsGeoJSON(geom)::json AS geom_json
+    FROM citizen_report
+    WHERE (:status IS NULL OR status = :status)
+      AND (:report_type IS NULL OR report_type = :report_type)
+      AND (:village_id IS NULL OR village_id = :village_id)
+    ORDER BY created_at DESC
+    LIMIT :limit OFFSET :offset
+    """
+)
+_REPORT_BY_ID_SELECT = text(_REPORT_SELECT.text.replace(
+    "WHERE (:status IS NULL OR status = :status)\n"
+    "      AND (:report_type IS NULL OR report_type = :report_type)\n"
+    "      AND (:village_id IS NULL OR village_id = :village_id)",
+    "WHERE id = :id",
+))
+
+
+def _row_to_report(row) -> CitizenReportRead:
+    geom = row.geom_json
+    if isinstance(geom, str):
+        geom = json.loads(geom)
+    return CitizenReportRead(
+        id=row.id,
+        report_code=row.report_code,
+        reporter_name=row.reporter_name,
+        reporter_phone=row.reporter_phone,
+        report_type=row.report_type,
+        severity=row.severity or "unknown",
+        description=row.description,
+        accuracy_m=float(row.accuracy_m) if row.accuracy_m is not None else None,
+        altitude_m=float(row.altitude_m) if row.altitude_m is not None else None,
+        village_id=row.village_id,
+        road_id=row.road_id,
+        status=row.status,
+        priority_score=float(row.priority_score or 0),
+        cv_classification=row.cv_classification,
+        cv_confidence=float(row.cv_confidence) if row.cv_confidence is not None else None,
+        cv_inference_at=row.cv_inference_at,
+        verified_by=row.verified_by,
+        verified_at=row.verified_at,
+        verification_notes=row.verification_notes,
+        assigned_to=row.assigned_to,
+        resolved_at=row.resolved_at,
+        resolution_notes=row.resolution_notes,
+        metadata=row.metadata or {},
+        geom=geom,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -313,16 +378,26 @@ async def list_reports(
     params: ReportListParams = Depends(),
     db=Depends(get_db_session),
 ):
-    """List citizen reports with filters."""
-    # In production: query DB with filters
-    return []
+    """List citizen reports with filters — DB-backed, surfaces live-engine problems too."""
+    try:
+        result = await db.execute(
+            _REPORT_SELECT,
+            {"status": params.status, "report_type": params.report_type, "village_id": params.village_id,
+             "limit": params.page_size, "offset": (params.page - 1) * params.page_size},
+        )
+        return [_row_to_report(row) for row in result.all()]
+    except Exception as exc:
+        logger.warning("reports_query_failed", error=str(exc))
+        raise HTTPException(status_code=503, detail="Report store unavailable") from exc
 
 
 @app.get("/reports/{report_id}", response_model=CitizenReportRead)
 async def get_report(report_id: UUID, db=Depends(get_db_session)):
     """Get a single report by ID."""
-    # Placeholder
-    raise HTTPException(status_code=404, detail="Report not found")
+    row = (await db.execute(_REPORT_BY_ID_SELECT, {"id": report_id, "limit": 1, "offset": 0})).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return _row_to_report(row)
 
 
 @app.post("/reports/{report_id}/verify", response_model=CitizenReportRead)
@@ -331,17 +406,26 @@ async def verify_report(
     request: ReportVerifyRequest,
     db=Depends(get_db_session),
 ):
-    """Verify or reject a report (official action)."""
-    # Update report status, verification_notes, assigned_to
-    return CitizenReportRead(
-        id=report_id,
-        report_code="GSN-2024-000001",
-        status="verified" if request.verified else "rejected",
-        verification_notes=request.verification_notes,
-        verified_by=uuid4(),  # current user
-        verified_at=datetime.now(),
-        updated_at=datetime.now(),
+    """Verify or reject a report — persists to DB so live problems can be triaged."""
+    now = datetime.now(UTC)
+    # Use dummy user when auth not wired in report-service
+    result = await db.execute(
+        text(
+            "UPDATE citizen_report SET status = :status, verification_notes = :notes, "
+            "verified_at = :now, updated_at = :now WHERE id = :id RETURNING id"
+        ),
+        {
+            "id": report_id,
+            "status": "verified" if request.verified else "rejected",
+            "notes": request.verification_notes,
+            "now": now,
+        },
     )
+    if result.first() is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    await db.commit()
+    row = (await db.execute(_REPORT_BY_ID_SELECT, {"id": report_id, "limit": 1, "offset": 0})).first()
+    return _row_to_report(row)
 
 
 @app.patch("/reports/{report_id}/status", response_model=CitizenReportRead)
@@ -351,14 +435,23 @@ async def update_report_status(
     db=Depends(get_db_session),
 ):
     """Update report status (e.g., escalated, resolved)."""
-    return CitizenReportRead(
-        id=report_id,
-        report_code="GSN-2024-000001",
-        status=request.status,
-        resolution_notes=request.resolution_notes,
-        resolved_at=datetime.now() if request.status == "resolved" else None,
-        updated_at=datetime.now(),
+    allowed = {"submitted", "triaged", "verified", "rejected", "assigned", "escalated", "resolved"}
+    if request.status not in allowed:
+        raise HTTPException(status_code=422, detail="Unsupported report status")
+    now = datetime.now(UTC)
+    result = await db.execute(
+        text(
+            "UPDATE citizen_report SET status = :status, resolution_notes = :notes, "
+            "resolved_at = CASE WHEN :status='resolved' THEN :now ELSE NULL END, "
+            "updated_at = :now WHERE id = :id RETURNING id"
+        ),
+        {"id": report_id, "status": request.status, "notes": request.resolution_notes, "now": now},
     )
+    if result.first() is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    await db.commit()
+    row = (await db.execute(_REPORT_BY_ID_SELECT, {"id": report_id, "limit": 1, "offset": 0})).first()
+    return _row_to_report(row)
 
 
 @app.get("/reports/{report_id}/media")

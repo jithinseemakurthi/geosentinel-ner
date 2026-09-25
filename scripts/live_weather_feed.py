@@ -50,9 +50,11 @@ def fetch(district: str) -> dict:
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     times = [datetime.fromisoformat(t) for t in h["time"]]
     mm = [v or 0.0 for v in h["precipitation"]]
+    # Next 12h accumulation: Open-Meteo hourly steps are instant values at
+    # their timestamp, so take every step in [now, now+12h).
     f12 = sum(
         v for t, v in zip(times, mm)
-        if now <= t < now.replace(microsecond=0) and 0 <= (t - now).total_seconds() < 43200
+        if 0 <= (t - now).total_seconds() < 43200
     )
     a3 = sum(v for t, v in zip(times, mm) if -259200 <= (t - now).total_seconds() < 0)
     a7 = sum(v for t, v in zip(times, mm) if -604800 <= (t - now).total_seconds() < 0)

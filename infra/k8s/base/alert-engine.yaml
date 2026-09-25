@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alert-engine
+  namespace: geosentinel
+  labels:
+    app: alert-engine
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: alert-engine
+  template:
+    metadata:
+      labels:
+        app: alert-engine
+    spec:
+      containers:
+        - name: alert-engine
+          image: geosentinel/alert-engine:latest
+          ports:
+            - containerPort: 8003
+          envFrom:
+            - configMapRef:
+                name: geosentinel-config
+            - secretRef:
+                name: geosentinel-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8003
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alert-engine
+  namespace: geosentinel
+  labels:
+    app: alert-engine
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8003
+      targetPort: 8003
+      name: http
+  selector:
+    app: alert-engine

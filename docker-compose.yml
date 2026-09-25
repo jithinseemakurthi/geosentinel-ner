@@ -50,7 +50,7 @@ services:
   # TimescaleDB (Sensor time-series data)
   # ---------------------------------------------------------------------------
   timescaledb:
-    image: timescale/timescaledb:latest-pg16
+    image: timescale/timescaledb:2.17.2-pg16
     container_name: geosentinel-timescaledb
     <<: *default-restart
     environment:
@@ -108,7 +108,7 @@ services:
   # MinIO (S3-compatible object storage)
   # ---------------------------------------------------------------------------
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
     container_name: geosentinel-minio
     <<: *default-restart
     command: server /data --console-address ":9001"
@@ -195,7 +195,8 @@ services:
   # TiTiler (Cloud-optimized GeoTIFF tile server)
   # ---------------------------------------------------------------------------
   titiler:
-    image: developmentseed/titiler:0.12.0
+    # TiTiler images are published on ghcr.io (not Docker Hub).
+    image: ghcr.io/developmentseed/titiler:0.12.0
     container_name: geosentinel-titiler
     environment:
       # Host port 8104 avoids clashing with gis-service (8004).
@@ -470,6 +471,38 @@ services:
     networks:
       - geosentinel-net
     logging: *default-logging
+
+  live-engine:
+    build:
+      context: .
+      dockerfile: services/live-engine/Dockerfile
+    container_name: geosentinel-live-engine
+    <<: *default-restart
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-geosentinel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-geosentinel}
+      TIMESCALE_URL: postgresql://${POSTGRES_USER:-geosentinel}:${POSTGRES_PASSWORD}@timescaledb:5432/${TIMESCALE_DB:-geosentinel_ts}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      LIVE_ENGINE_INTERVAL_SECONDS: ${LIVE_ENGINE_INTERVAL_SECONDS:-300}
+      # LLM for report analysis (same aliases as api-gateway)
+      GEO_LLM_API_KEY: ${GEO_LLM_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY:-}
+    ports:
+      - "127.0.0.1:8007:8007"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - geosentinel-net
+    logging: *default-logging
+    profiles:
+      - live-engine
 
   web-dashboard:
     build:

@@ -7,7 +7,7 @@ in production with a weak or default SECRET_KEY.
 from functools import lru_cache
 from typing import List, Optional
 
-from pydantic import Field, ValidationInfo, field_validator, model_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Tokens that are clearly placeholders — reject these in production.
@@ -148,8 +148,35 @@ class Settings(BaseSettings):
     FIREBASE_PROJECT_ID: Optional[str] = None
     FIREBASE_PRIVATE_KEY: Optional[str] = None
     FIREBASE_CLIENT_EMAIL: Optional[str] = None
+    # Firebase service account: JSON blob (env var) or path to a JSON key file
+    FIREBASE_SERVICE_ACCOUNT_JSON: Optional[str] = None
+    FIREBASE_SERVICE_ACCOUNT_FILE: Optional[str] = None
     WHATSAPP_PHONE_NUMBER_ID: Optional[str] = None
     WHATSAPP_ACCESS_TOKEN: Optional[str] = None
+    WHATSAPP_WEBHOOK_VERIFY_TOKEN: str = "geosentinel_wa_webhook_secret"
+
+    # ----- Universal assistant LLM -----
+    # OpenAI-compatible chat-completions endpoint. Works with Groq, OpenAI, Together,
+    # NVIDIA NGC/Integrate, Ollama/OpenAI-compatible gateways, Azure proxies, etc.
+    # Accepts multiple env aliases so `OPENAI_API_KEY` or `GROQ_API_KEY` just works.
+    GEO_LLM_API_KEY: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "GEO_LLM_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY", "TOGETHER_API_KEY", "LLM_API_KEY", "NGC_API_KEY"
+        ),
+    )
+    GEO_LLM_BASE_URL: str = Field(
+        default="https://integrate.api.nvidia.com/v1/chat/completions",
+        validation_alias=AliasChoices(
+            "GEO_LLM_BASE_URL", "OPENAI_BASE_URL", "GROQ_BASE_URL", "LLM_BASE_URL", "OPENAI_API_BASE"
+        ),
+    )
+    GEO_LLM_MODEL: str = Field(
+        default="nvidia/llama-3.1-nemotron-nano-8b-v1",
+        validation_alias=AliasChoices("GEO_LLM_MODEL", "OPENAI_MODEL", "GROQ_MODEL", "LLM_MODEL"),
+    )
+    GEO_LLM_TIMEOUT_SECONDS: float = 18.0
+    GEO_LLM_MAX_TOKENS: int = 700
 
     # ----- ML -----
     MLFLOW_TRACKING_URI: str = "http://localhost:5000"

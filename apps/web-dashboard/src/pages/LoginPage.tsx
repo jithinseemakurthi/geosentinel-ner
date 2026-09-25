@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState } from 'react'
 import { login } from '@/services/api'
 import Logo from '@/components/Logo'
+import Globe3D from '@/components/Globe3D'
 
 export default function LoginPage({ onLogin }: { onLogin: (username: string, demo: boolean) => void }) {
   const [username, setUsername] = useState('')
@@ -8,39 +9,6 @@ export default function LoginPage({ onLogin }: { onLogin: (username: string, dem
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  // --- Live ring: continuous spin + mouse parallax tilt ---
-  const ringRef = useRef<HTMLDivElement>(null)
-  const targetTilt = useRef({ x: 0, y: 0 })
-  const curTilt = useRef({ x: 0, y: 0 })
-
-  useEffect(() => {
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-    let raf = 0
-    let spin = 0
-    let last = performance.now()
-    const tick = (now: number) => {
-      const dt = Math.min(0.05, (now - last) / 1000)
-      last = now
-      spin += dt * 4 // deg/sec → one full revolution every ~90 s
-      // ease tilt toward cursor target (buttery smooth)
-      curTilt.current.x += (targetTilt.current.x - curTilt.current.x) * 0.055
-      curTilt.current.y += (targetTilt.current.y - curTilt.current.y) * 0.055
-      if (ringRef.current) {
-        ringRef.current.style.transform =
-          `rotate(${spin.toFixed(2)}deg) rotateX(${curTilt.current.y.toFixed(2)}deg) rotateY(${curTilt.current.x.toFixed(2)}deg)`
-      }
-      raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-  }, [])
-
-  function handleMouseMove(e: React.MouseEvent<HTMLDivElement>) {
-    const nx = e.clientX / window.innerWidth - 0.5   // -0.5 … 0.5
-    const ny = e.clientY / window.innerHeight - 0.5
-    targetTilt.current.x = nx * 10                    // ±5° yaw
-    targetTilt.current.y = -ny * 8                    // ±4° pitch
-  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -60,42 +28,33 @@ export default function LoginPage({ onLogin }: { onLogin: (username: string, dem
   }
 
   return (
-    <div className="relative min-h-full flex items-center justify-center px-4 overflow-hidden" onMouseMove={handleMouseMove}>
-      {/* Live galactic background — the RING spins continuously; scene tilts with your cursor */}
-      <div className="absolute inset-0 -z-10 overflow-hidden" aria-hidden="true" style={{ perspective: '1400px' }}>
-        {/* Oversized layer so rotation never reveals corners */}
-        <div
-          ref={ringRef}
-          className="absolute -inset-[30%]"
-          style={{
-            backgroundImage: 'url("/galactic-ring.jpg")',
-            backgroundSize: 'cover',
-            backgroundPosition: 'center',
-            backgroundRepeat: 'no-repeat',
-            filter: 'brightness(0.55) saturate(1.15)',
-            willChange: 'transform',
-            transformOrigin: '50% 50%',
-            transform: 'rotate(0deg)',
-          }}
-        />
-        {/* Contrast overlay + vignette */}
-        <div className="absolute inset-0" style={{ background: 'radial-gradient(ellipse at center, rgba(0,0,0,0.35) 0%, rgba(0,0,0,0.72) 100%)' }} />
-        {/* Subtle noise texture */}
-        <div className="absolute inset-0 opacity-[0.03]" style={{
-          backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E")`,
-        }} />
-      </div>
+    <div className="relative min-h-full flex items-center justify-center px-4 overflow-hidden">
+      <Globe3D />
 
       <div className="w-full max-w-sm animate-slide-up relative z-10">
-        <div className="mb-8 text-center">
-          <Logo className="mx-auto mb-3 h-14 w-14 rounded-xl drop-shadow-[0_10px_34px_rgba(56,189,248,0.35)]" />
-          <h1 className="text-xl font-extrabold tracking-tight text-white drop-shadow-lg">
-            GeoSentinel<span className="text-gradient">-NER</span>
+        <div className="mb-7 text-center">
+          <Logo className="mx-auto mb-3 h-14 w-14 rounded-xl" />
+          <h1 className="text-xl font-bold tracking-tight text-white">
+            GeoSentinel<span className="text-[#38BDF8]">-NER</span>
           </h1>
-          <p className="mt-1 text-xs text-slate-300/80">Landslide Early Warning · Officer & Citizen Portal</p>
+          <p className="mt-1 text-xs text-slate-300/85">Landslide Early Warning · Officer & Citizen Portal</p>
+          <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 backdrop-blur-md">
+            <span className="relative flex h-1.5 w-1.5">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-70" />
+              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[#22C55E]" />
+            </span>
+            <span className="text-[10px] font-semibold uppercase tracking-widest text-emerald-300/90">
+              Live · 5 NE stations · satellite linked
+            </span>
+          </div>
         </div>
 
-        <form onSubmit={handleSubmit} className="solid-panel space-y-4 p-6">
+        <div className="relative">
+          <div
+            aria-hidden
+            className="pointer-events-none absolute -inset-3 -z-10 rounded-[1.7rem] bg-gradient-to-tr from-sky-500/20 via-indigo-500/14 to-cyan-400/14 blur-2xl"
+          />
+          <form onSubmit={handleSubmit} className="solid-panel space-y-4 p-6 backdrop-blur-xl">
           <div>
             <label htmlFor="username" className="label text-slate-200">Username or email</label>
             <input
@@ -133,11 +92,15 @@ export default function LoginPage({ onLogin }: { onLogin: (username: string, dem
           </button>
 
           <p className="text-center text-[11px] leading-relaxed text-slate-400/80">
-            API offline? Any username + 8-char password enters demo mode.
+            Sign in with your officer credentials.
             <br />
             Accounts lock for 15 min after 5 failed attempts.
           </p>
-        </form>
+          </form>
+          <p className="mt-3 text-center text-[10px] tracking-wide text-slate-500/70">
+            Drag the globe · scroll to zoom · network arcs show live inter-station links
+          </p>
+        </div>
       </div>
     </div>
   )

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: geosentinel
+  labels:
+    app.kubernetes.io/name: geosentinel
+    app.kubernetes.io/part-of: geosentinel-ner

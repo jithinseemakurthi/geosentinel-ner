@@ -27,15 +27,25 @@ export interface SensorStation {
 export interface CitizenReport {
   id: string
   code: string
-  reportType: 'crack' | 'bulge' | 'subsidence' | 'debris' | 'rockfall' | 'road_block' | 'excavation' | 'water_spring' | 'other'
+  reportType: 'crack' | 'bulge' | 'subsidence' | 'debris' | 'rockfall' | 'road_block' | 'excavation' | 'water_spring' | 'other' | string
   village: string
   district: string
   severity: string
   description?: string
-  status: 'submitted' | 'verified' | 'assigned' | 'resolved'
+  status: 'submitted' | 'verified' | 'assigned' | 'resolved' | 'live_internet'
   priorityScore: number
   createdAt: string
   reporterName?: string
+  source?: 'Citizen' | 'GDACS' | 'ReliefWeb' | 'Tavily' | 'Brave' | 'Open-Meteo' | 'USGS' | 'EONET' | 'GNews' | string
+  url?: string | null
+  country?: string
+  latitude?: number
+  longitude?: number
+  problem_tags?: string[]
+  problem_hits?: number
+  confidence?: number
+  event_type?: string
+  raw_title?: string
 }
 
 export interface GeoPoint {

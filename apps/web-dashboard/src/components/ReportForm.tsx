@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
-import { submitReport, reverseGeocode } from '@/services/api'
+import { submitReport, uploadReportMedia, reverseGeocode } from '@/services/api'
 import type { CitizenReport } from '@/types'
 import { useMap } from '@/hooks/useMap'
 import { useDismissable } from '@/hooks/useDismissable'
@@ -52,7 +52,7 @@ export default function ReportForm({
       markerRef.current.remove()
       markerRef.current = null
     }
-    const mk = new maplibregl.Marker({ draggable: true, color: '#58a6ff' })
+    const mk = new maplibregl.Marker({ draggable: true, color: '#38BDF8' })
       .setLngLat([Number(lng), Number(lat)])
       .addTo(map)
     mk.on('dragend', () => {
@@ -96,6 +96,9 @@ export default function ReportForm({
     setBusy(true); setError('')
     try {
       const created = await submitReport({ reportType, severity, description: description.trim(), reporterName: reporterName.trim(), lat: la, lng: lo })
+      if (photos.length > 0 && !(await uploadReportMedia(created.id, photos))) {
+        throw new Error('Report created, but one or more media files could not be uploaded')
+      }
       onCreated(created)
       onClose()
     } catch (err: any) {

@@ -9,6 +9,7 @@ Security notes:
   for traceability and refund handling.
 """
 import asyncio
+import json
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -17,8 +18,9 @@ from uuid import UUID, uuid4
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
 from geosentinel_shared import (
+    AlertRecipientRead,
     check_permission,
     close_db,
     configure_logging,
@@ -198,30 +200,411 @@ class SMSProvider:
 class PushProvider:
     def __init__(self):
         self.project_id = settings.FIREBASE_PROJECT_ID
+        self._app = None
+
+    def _init_firebase(self):
+        """Initialize firebase-admin once using either a service-account JSON
+        (FIREBASE_SERVICE_ACCOUNT_JSON / FIREBASE_SERVICE_ACCOUNT_FILE) or the
+        project-id + client-email + private-key triple. Returns None when
+        firebase-admin is not installed (falls back to mock)."""
+        app = self._app
+        if app is not None:
+            return app
+        try:
+            import firebase_admin  # type: ignore
+            from firebase_admin import credentials  # type: ignore
+        except ImportError:
+            logger.warning("firebase_admin_not_installed_push_mocked")
+            return None
+        options = {"projectId": self.project_id}
+        if getattr(settings, "FIREBASE_SERVICE_ACCOUNT_FILE", None):
+            cred = credentials.Certificate(settings.FIREBASE_SERVICE_ACCOUNT_FILE)
+        else:
+            service_account_json = getattr(settings, "FIREBASE_SERVICE_ACCOUNT_JSON", None)
+            if service_account_json:
+                import json as _json
+
+                info = _json.loads(service_account_json)
+            else:
+                if not (settings.FIREBASE_CLIENT_EMAIL and settings.FIREBASE_PRIVATE_KEY):
+                    logger.warning("firebase_credentials_missing_push_mocked")
+                    return None
+                info = {
+                    "project_id": self.project_id,
+                    "client_email": settings.FIREBASE_CLIENT_EMAIL,
+                    "private_key": settings.FIREBASE_PRIVATE_KEY.replace("\\n", "\n"),
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                }
+            cred = credentials.Certificate(info)
+        try:
+            app = firebase_admin.initialize_app(cred, options)
+        except ValueError:
+            # Already initialized in this process — reuse the default app.
+            app = firebase_admin.get_app()
+        self._app = app
+        return app
+
+    def _build_android_config(self, priority: str = "high"):
+        try:
+            from firebase_admin import messaging
+            return messaging.AndroidConfig(
+                priority=priority,
+                notification=messaging.AndroidNotification(
+                    channel_id="landslide_alerts",
+                    sound="default",
+                    click_action="OPEN_ALERT_ACTIVITY",
+                ),
+            )
+        except Exception:
+            return None
+
+    def _build_apns_config(self):
+        try:
+            from firebase_admin import messaging
+            return messaging.APNSConfig(
+                payload=messaging.APNSPayload(
+                    aps=messaging.Aps(sound="default", badge=1)
+                )
+            )
+        except Exception:
+            return None
+
+    def _build_webpush_config(self):
+        try:
+            from firebase_admin import messaging
+            return messaging.WebpushConfig(
+                headers={"Urgency": "high"},
+                notification=messaging.WebpushNotification(icon="/logo.svg"),
+            )
+        except Exception:
+            return None
 
     async def send(self, device_token: str, title: str, body: str, data: Dict[str, Any]) -> Dict[str, Any]:
         if not self.project_id:
             raise RuntimeError("FIREBASE_PROJECT_ID is not configured")
         logger.info("push_sending", device_token=device_token[:10] + "****", title=title)
-        # TODO: firebase-admin SDK
-        return {"status": "sent", "message_id": f"mock_{uuid4().hex[:8]}"}
+        app = self._init_firebase()
+        if app is None:
+            return {"status": "sent", "message_id": f"mock_{uuid4().hex[:8]}", "mode": "mock"}
+        from firebase_admin import messaging  # type: ignore
+
+        message = messaging.Message(
+            token=device_token,
+            notification=messaging.Notification(title=title, body=body),
+            data={k: str(v) for k, v in (data or {}).items() if v is not None},
+            android=self._build_android_config(),
+            apns=self._build_apns_config(),
+            webpush=self._build_webpush_config(),
+        )
+        result = await asyncio.to_thread(messaging.send, message, app=app)
+        return {"status": "sent", "message_id": result, "mode": "firebase"}
 
     async def send_multicast(self, device_tokens: List[str], title: str, body: str, data: Dict) -> Dict[str, Any]:
-        return {"success_count": len(device_tokens), "failure_count": 0}
+        if not self.project_id:
+            raise RuntimeError("FIREBASE_PROJECT_ID is not configured")
+        if not device_tokens:
+            return {"success_count": 0, "failure_count": 0, "invalid_tokens": []}
+        app = self._init_firebase()
+        if app is None:
+            return {"success_count": len(device_tokens), "failure_count": 0, "invalid_tokens": [], "mode": "mock"}
+        from firebase_admin import messaging  # type: ignore
+
+        tokens = list(device_tokens[:500])
+        message = messaging.MulticastMessage(
+            tokens=tokens,
+            notification=messaging.Notification(title=title, body=body),
+            data={k: str(v) for k, v in (data or {}).items() if v is not None},
+            android=self._build_android_config(),
+            apns=self._build_apns_config(),
+            webpush=self._build_webpush_config(),
+        )
+        batch_response = await asyncio.to_thread(
+            messaging.send_multicast, message, dry_run=False, app=app
+        )
+        invalid_tokens = []
+        if batch_response.failure_count > 0:
+            for idx, resp in enumerate(batch_response.responses):
+                if not resp.success and resp.exception:
+                    code = str(resp.exception).lower()
+                    if "not-registered" in code or "invalid" in code or "unregistered" in code:
+                        invalid_tokens.append(tokens[idx])
+        return {
+            "success_count": batch_response.success_count,
+            "failure_count": batch_response.failure_count,
+            "invalid_tokens": invalid_tokens,
+            "mode": "firebase",
+        }
+
+    async def send_topic(self, topic: str, title: str, body: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.project_id:
+            raise RuntimeError("FIREBASE_PROJECT_ID is not configured")
+        topic_name = topic.strip().lstrip("/")
+        logger.info("push_topic_sending", topic=topic_name, title=title)
+        app = self._init_firebase()
+        if app is None:
+            return {
+                "status": "sent",
+                "message_id": f"mock_topic_{uuid4().hex[:8]}",
+                "topic": topic_name,
+                "mode": "mock",
+            }
+        from firebase_admin import messaging  # type: ignore
+
+        message = messaging.Message(
+            topic=topic_name,
+            notification=messaging.Notification(title=title, body=body),
+            data={k: str(v) for k, v in (data or {}).items() if v is not None},
+            android=self._build_android_config(),
+            apns=self._build_apns_config(),
+            webpush=self._build_webpush_config(),
+        )
+        result = await asyncio.to_thread(messaging.send, message, app=app)
+        return {"status": "sent", "message_id": result, "topic": topic_name, "mode": "firebase"}
+
+    async def subscribe_to_topic(self, device_tokens: List[str], topic: str) -> Dict[str, Any]:
+        if not self.project_id:
+            raise RuntimeError("FIREBASE_PROJECT_ID is not configured")
+        topic_name = topic.strip().lstrip("/")
+        app = self._init_firebase()
+        if app is None:
+            return {"success_count": len(device_tokens), "failure_count": 0, "topic": topic_name, "mode": "mock"}
+        from firebase_admin import messaging  # type: ignore
+
+        response = await asyncio.to_thread(
+            messaging.subscribe_to_topic, device_tokens, topic_name, app=app
+        )
+        return {
+            "success_count": response.success_count,
+            "failure_count": response.failure_count,
+            "topic": topic_name,
+            "mode": "firebase",
+        }
+
+    async def unsubscribe_from_topic(self, device_tokens: List[str], topic: str) -> Dict[str, Any]:
+        if not self.project_id:
+            raise RuntimeError("FIREBASE_PROJECT_ID is not configured")
+        topic_name = topic.strip().lstrip("/")
+        app = self._init_firebase()
+        if app is None:
+            return {"success_count": len(device_tokens), "failure_count": 0, "topic": topic_name, "mode": "mock"}
+        from firebase_admin import messaging  # type: ignore
+
+        response = await asyncio.to_thread(
+            messaging.unsubscribe_from_topic, device_tokens, topic_name, app=app
+        )
+        return {
+            "success_count": response.success_count,
+            "failure_count": response.failure_count,
+            "topic": topic_name,
+            "mode": "firebase",
+        }
 
 
 class WhatsAppProvider:
+    GRAPH_API_VERSION = "v21.0"
+
     def __init__(self):
         self.phone_number_id = settings.WHATSAPP_PHONE_NUMBER_ID
         self.access_token = settings.WHATSAPP_ACCESS_TOKEN
 
-    async def send_template(self, to: str, template_name: str, language: str, params: List[str]) -> Dict[str, Any]:
+    async def _post(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.access_token or not self.phone_number_id:
+            raise RuntimeError("WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID are required")
+        url = (
+            f"https://graph.facebook.com/{self.GRAPH_API_VERSION}/"
+            f"{self.phone_number_id}/messages"
+        )
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self.access_token}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+        response.raise_for_status()
+        return response.json()
+
+    async def send_template(
+        self,
+        to: str,
+        template_name: str,
+        language: str = "en",
+        params: Optional[List[str]] = None,
+        header_params: Optional[List[str]] = None,
+        button_payloads: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         to = _validate_phone(to)
-        if not self.access_token:
-            raise RuntimeError("WHATSAPP_ACCESS_TOKEN is not configured")
         logger.info("whatsapp_sending", to=to[:6] + "****", template=template_name)
-        # TODO: Meta Cloud API
-        return {"status": "sent", "message_id": f"mock_{uuid4().hex[:8]}"}
+        components = []
+        if header_params:
+            components.append({
+                "type": "header",
+                "parameters": [{"type": "text", "text": str(p)} for p in header_params[:5]],
+            })
+        if params:
+            components.append({
+                "type": "body",
+                "parameters": [{"type": "text", "text": str(p)} for p in params[:10]],
+            })
+        if button_payloads:
+            for idx, payload_val in enumerate(button_payloads[:3]):
+                components.append({
+                    "type": "button",
+                    "sub_type": "quick_reply",
+                    "index": str(idx),
+                    "parameters": [{"type": "payload", "payload": str(payload_val)}],
+                })
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "template",
+            "template": {
+                "name": template_name,
+                "language": {"code": language or "en"},
+                **({"components": components} if components else {}),
+            },
+        }
+        body = await self._post(payload)
+        message_id = (body.get("messages") or [{}])[0].get("id")
+        return {"status": "sent", "message_id": message_id or f"wa_{uuid4().hex[:8]}"}
+
+    async def send_text(self, to: str, text: str, preview_url: bool = False) -> Dict[str, Any]:
+        to = _validate_phone(to)
+        logger.info("whatsapp_text_sending", to=to[:6] + "****", len=len(text))
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "text",
+            "text": {"preview_url": preview_url, "body": text[:4096]},
+        }
+        body = await self._post(payload)
+        message_id = (body.get("messages") or [{}])[0].get("id")
+        return {"status": "sent", "message_id": message_id or f"wa_{uuid4().hex[:8]}"}
+
+    async def send_interactive_buttons(
+        self,
+        to: str,
+        body_text: str,
+        buttons: List[Dict[str, str]],
+        header_text: Optional[str] = None,
+        footer_text: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Send quick reply interactive buttons (max 3 buttons)."""
+        to = _validate_phone(to)
+        btn_objects = []
+        for i, b in enumerate(buttons[:3]):
+            btn_id = b.get("id", f"btn_{i}")
+            btn_title = b.get("title", f"Option {i+1}")[:20]
+            btn_objects.append({
+                "type": "reply",
+                "reply": {"id": btn_id, "title": btn_title},
+            })
+        interactive: Dict[str, Any] = {
+            "type": "button",
+            "body": {"text": body_text[:1024]},
+            "action": {"buttons": btn_objects},
+        }
+        if header_text:
+            interactive["header"] = {"type": "text", "text": header_text[:60]}
+        if footer_text:
+            interactive["footer"] = {"text": footer_text[:60]}
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "interactive",
+            "interactive": interactive,
+        }
+        body = await self._post(payload)
+        message_id = (body.get("messages") or [{}])[0].get("id")
+        return {"status": "sent", "message_id": message_id or f"wa_{uuid4().hex[:8]}"}
+
+    async def send_interactive_list(
+        self,
+        to: str,
+        body_text: str,
+        button_text: str,
+        sections: List[Dict[str, Any]],
+        header_text: Optional[str] = None,
+        footer_text: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Send interactive menu list (max 10 rows)."""
+        to = _validate_phone(to)
+        interactive: Dict[str, Any] = {
+            "type": "list",
+            "body": {"text": body_text[:1024]},
+            "action": {
+                "button": button_text[:20],
+                "sections": sections[:10],
+            },
+        }
+        if header_text:
+            interactive["header"] = {"type": "text", "text": header_text[:60]}
+        if footer_text:
+            interactive["footer"] = {"text": footer_text[:60]}
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "interactive",
+            "interactive": interactive,
+        }
+        body = await self._post(payload)
+        message_id = (body.get("messages") or [{}])[0].get("id")
+        return {"status": "sent", "message_id": message_id or f"wa_{uuid4().hex[:8]}"}
+
+    async def send_location(
+        self,
+        to: str,
+        latitude: float,
+        longitude: float,
+        name: Optional[str] = None,
+        address: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Send location pin."""
+        to = _validate_phone(to)
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "location",
+            "location": {
+                "latitude": latitude,
+                "longitude": longitude,
+                "name": name or "GeoSentinel Location",
+                "address": address or f"{latitude:.4f}, {longitude:.4f}",
+            },
+        }
+        body = await self._post(payload)
+        message_id = (body.get("messages") or [{}])[0].get("id")
+        return {"status": "sent", "message_id": message_id or f"wa_{uuid4().hex[:8]}"}
+
+    async def send_media(
+        self,
+        to: str,
+        media_type: str,
+        media_url: str,
+        caption: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Send media (image, document, audio, video)."""
+        to = _validate_phone(to)
+        media_payload: Dict[str, Any] = {"link": media_url}
+        if caption and media_type in ("image", "document", "video"):
+            media_payload["caption"] = caption[:1024]
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": media_type,
+            media_type: media_payload,
+        }
+        body = await self._post(payload)
+        message_id = (body.get("messages") or [{}])[0].get("id")
+        return {"status": "sent", "message_id": message_id or f"wa_{uuid4().hex[:8]}"}
 
 
 class EmailProvider:
@@ -507,19 +890,52 @@ class NotificationDispatcher:
                 template_id=settings.SMS_TEMPLATE_ID_ALERT,
             )
         if channel == "push":
+            if recipient.get("topic"):
+                return await push_provider.send_topic(
+                    topic=recipient["topic"],
+                    title=f"GeoSentinel Alert - {severity.upper()}",
+                    body=template,
+                    data={"alert_id": recipient.get("alert_id"), "severity": severity},
+                )
             return await push_provider.send(
-                device_token=recipient["device_token"],
+                device_token=recipient.get("device_token", ""),
                 title=f"GeoSentinel Alert - {severity.upper()}",
                 body=template,
                 data={"alert_id": recipient.get("alert_id"), "severity": severity},
             )
         if channel == "whatsapp":
-            return await whatsapp_provider.send_template(
-                to=recipient["contact"],
-                template_name=recipient.get("whatsapp_template", "alert_template"),
-                language=recipient.get("language", settings.DEFAULT_LANGUAGE),
-                params=recipient.get("template_params", []),
-            )
+            contact = recipient.get("contact", "")
+            if recipient.get("interactive_buttons"):
+                return await whatsapp_provider.send_interactive_buttons(
+                    to=contact,
+                    body_text=template,
+                    buttons=recipient["interactive_buttons"],
+                    header_text=f"GeoSentinel {severity.upper()}",
+                )
+            if recipient.get("location"):
+                loc = recipient["location"]
+                return await whatsapp_provider.send_location(
+                    to=contact,
+                    latitude=loc["latitude"],
+                    longitude=loc["longitude"],
+                    name=loc.get("name"),
+                    address=loc.get("address"),
+                )
+            if recipient.get("media_url"):
+                return await whatsapp_provider.send_media(
+                    to=contact,
+                    media_type=recipient.get("media_type", "image"),
+                    media_url=recipient["media_url"],
+                    caption=template,
+                )
+            if recipient.get("whatsapp_template"):
+                return await whatsapp_provider.send_template(
+                    to=contact,
+                    template_name=recipient["whatsapp_template"],
+                    language=recipient.get("language", settings.DEFAULT_LANGUAGE),
+                    params=recipient.get("template_params", []),
+                )
+            return await whatsapp_provider.send_text(to=contact, text=template)
         if channel == "email":
             return await email_provider.send(
                 to=recipient["contact"],
@@ -531,8 +947,48 @@ class NotificationDispatcher:
         raise ValueError(f"Unknown channel: {channel}")
 
     async def _log_delivery(self, alert_id, recipient, channel, result):
-        # TODO: persist to alert_recipient table
-        pass
+        """Persist one delivery attempt to alert_recipient (best-effort).
+
+        Uses ON CONFLICT DO UPDATE so retries for the same
+        (alert, recipient, channel) update the row instead of failing.
+        """
+        recipient_id = str(recipient.get("id") or recipient.get("contact") or "unknown")
+        recipient_type = str(recipient.get("type") or "user")
+        status = "sent" if result.get("status") == "sent" else "failed"
+        error_message = result.get("error") if status == "failed" else None
+        provider_id = result.get("provider_id")
+        sent_at = datetime.now(timezone.utc) if status == "sent" else None
+        try:
+            from sqlalchemy import text
+
+            await self.db.execute(
+                text(
+                    """
+                    INSERT INTO alert_recipient
+                        (alert_id, recipient_type, recipient_id, channel, sent_at, status, error_message)
+                    VALUES (:alert_id, :recipient_type, :recipient_id, :channel, :sent_at, :status, :error_message)
+                    ON CONFLICT (alert_id, recipient_id, channel) DO UPDATE
+                        SET sent_at = EXCLUDED.sent_at,
+                            status = EXCLUDED.status,
+                            error_message = EXCLUDED.error_message,
+                            retry_count = alert_recipient.retry_count + 1
+                    """
+                ),
+                {
+                    "alert_id": alert_id,
+                    "recipient_type": recipient_type[:20],
+                    "recipient_id": recipient_id[:100],
+                    "channel": channel[:20],
+                    "sent_at": sent_at,
+                    "status": status,
+                    "error_message": error_message,
+                },
+            )
+            await self.db.flush()
+            if provider_id:
+                logger.info("delivery_logged", alert_id=str(alert_id), recipient=recipient_id[:10], channel=channel)
+        except Exception as exc:  # pragma: no cover - DB may be down in dev
+            logger.warning("alert_recipient_log_failed", error=str(exc), channel=channel, provider_id=provider_id)
 
 
 # -----------------------------------------------------------------------------
@@ -586,6 +1042,68 @@ class TestWhatsAppRequest(BaseModel):
     @classmethod
     def _v(cls, v: str) -> str:
         return _validate_phone(v)
+
+
+class TopicPushRequest(BaseModel):
+    topic: str = Field(..., min_length=1, max_length=100)
+    title: str = Field(default="Alert", max_length=200)
+    body: str = Field(..., max_length=4000)
+    data: Dict[str, Any] = Field(default_factory=dict)
+
+
+class TopicSubscriptionRequest(BaseModel):
+    topic: str = Field(..., min_length=1, max_length=100)
+    tokens: List[str] = Field(..., min_length=1, max_length=1000)
+
+
+class TestWhatsAppInteractiveRequest(BaseModel):
+    phone: str
+    body: str = Field(..., max_length=1024)
+    buttons: List[Dict[str, str]] = Field(..., min_length=1, max_length=3)
+    header: Optional[str] = Field(default=None, max_length=60)
+    footer: Optional[str] = Field(default=None, max_length=60)
+
+    @field_validator("phone")
+    @classmethod
+    def _v(cls, v: str) -> str:
+        return _validate_phone(v)
+
+
+class TestWhatsAppLocationRequest(BaseModel):
+    phone: str
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+    name: Optional[str] = Field(default=None, max_length=100)
+    address: Optional[str] = Field(default=None, max_length=200)
+
+    @field_validator("phone")
+    @classmethod
+    def _v(cls, v: str) -> str:
+        return _validate_phone(v)
+
+
+class TestWhatsAppMediaRequest(BaseModel):
+    phone: str
+    media_type: str = Field(default="image", description="image|document|audio|video")
+    media_url: str = Field(..., max_length=1000)
+    caption: Optional[str] = Field(default=None, max_length=1024)
+
+    @field_validator("phone")
+    @classmethod
+    def _v(cls, v: str) -> str:
+        return _validate_phone(v)
+
+
+class AlertRecipientStatusUpdateRequest(BaseModel):
+    status: str = Field(..., description="sent|delivered|read|failed")
+    error_message: Optional[str] = None
+    delivered_at: Optional[datetime] = None
+    read_at: Optional[datetime] = None
+
+
+class AlertRecipientRetryRequest(BaseModel):
+    recipient_ids: Optional[List[str]] = None
+    channels: Optional[List[str]] = None
 
 
 class RainfallAlertRequest(BaseModel):
@@ -949,6 +1467,271 @@ async def test_push(req: TestPushRequest):
 async def test_whatsapp(req: TestWhatsAppRequest):
     result = await whatsapp_provider.send_template(req.phone, req.template, "en", req.params)
     return result
+
+
+@app.post(f"{settings.API_PREFIX}/push/topic", dependencies=[Depends(require_role("admin"))])
+async def send_push_topic(req: TopicPushRequest):
+    """Send a push notification to all subscribers of a Firebase topic."""
+    result = await push_provider.send_topic(req.topic, req.title, req.body, req.data)
+    return result
+
+
+@app.post(f"{settings.API_PREFIX}/push/subscribe", dependencies=[Depends(require_role("admin"))])
+async def subscribe_push_topic(req: TopicSubscriptionRequest):
+    """Subscribe FCM device tokens to a topic."""
+    result = await push_provider.subscribe_to_topic(req.tokens, req.topic)
+    return result
+
+
+@app.post(f"{settings.API_PREFIX}/push/unsubscribe", dependencies=[Depends(require_role("admin"))])
+async def unsubscribe_push_topic(req: TopicSubscriptionRequest):
+    """Unsubscribe FCM device tokens from a topic."""
+    result = await push_provider.unsubscribe_from_topic(req.tokens, req.topic)
+    return result
+
+
+@app.post(f"{settings.API_PREFIX}/test/whatsapp/interactive", dependencies=[Depends(require_role("admin"))])
+async def test_whatsapp_interactive(req: TestWhatsAppInteractiveRequest):
+    """Send interactive quick reply buttons via WhatsApp Meta Cloud API."""
+    result = await whatsapp_provider.send_interactive_buttons(
+        to=req.phone,
+        body_text=req.body,
+        buttons=req.buttons,
+        header_text=req.header,
+        footer_text=req.footer,
+    )
+    return result
+
+
+@app.post(f"{settings.API_PREFIX}/test/whatsapp/location", dependencies=[Depends(require_role("admin"))])
+async def test_whatsapp_location(req: TestWhatsAppLocationRequest):
+    """Send a location pin via WhatsApp Meta Cloud API."""
+    result = await whatsapp_provider.send_location(
+        to=req.phone,
+        latitude=req.latitude,
+        longitude=req.longitude,
+        name=req.name,
+        address=req.address,
+    )
+    return result
+
+
+@app.post(f"{settings.API_PREFIX}/test/whatsapp/media", dependencies=[Depends(require_role("admin"))])
+async def test_whatsapp_media(req: TestWhatsAppMediaRequest):
+    """Send media (image/document/audio/video) via WhatsApp Meta Cloud API."""
+    result = await whatsapp_provider.send_media(
+        to=req.phone,
+        media_type=req.media_type,
+        media_url=req.media_url,
+        caption=req.caption,
+    )
+    return result
+
+
+# ----- WhatsApp Meta Cloud API Webhook -----
+@app.get(f"{settings.API_PREFIX}/whatsapp/webhook")
+async def verify_whatsapp_webhook(
+    mode: Optional[str] = Query(None, alias="hub.mode"),
+    verify_token_param: Optional[str] = Query(None, alias="hub.verify_token"),
+    challenge: Optional[str] = Query(None, alias="hub.challenge"),
+):
+    """Meta webhook verification endpoint."""
+    if mode == "subscribe" and verify_token_param == settings.WHATSAPP_WEBHOOK_VERIFY_TOKEN:
+        logger.info("whatsapp_webhook_verified")
+        return Response(content=challenge or "", media_type="text/plain")
+    logger.warning("whatsapp_webhook_verification_failed", mode=mode)
+    raise HTTPException(status_code=403, detail="Verification token mismatch")
+
+
+@app.post(f"{settings.API_PREFIX}/whatsapp/webhook")
+async def handle_whatsapp_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Process inbound WhatsApp status updates and citizen replies."""
+    body = await request.json()
+    logger.info("whatsapp_webhook_received", body_keys=list(body.keys()))
+    entries = body.get("entry", [])
+    from sqlalchemy import text
+
+    updated_count = 0
+    for entry in entries:
+        for change in entry.get("changes", []):
+            value = change.get("value", {})
+            # Process delivery status callbacks (sent, delivered, read, failed)
+            statuses = value.get("statuses", [])
+            for st in statuses:
+                recipient_id = st.get("recipient_id")
+                status = st.get("status")  # sent, delivered, read, failed
+                timestamp_str = st.get("timestamp")
+                status_time = (
+                    datetime.fromtimestamp(int(timestamp_str), timezone.utc)
+                    if timestamp_str and timestamp_str.isdigit()
+                    else datetime.now(timezone.utc)
+                )
+                errors = st.get("errors")
+                err_msg = json.dumps(errors) if errors else None
+
+                if recipient_id and status:
+                    # Update alert_recipient table
+                    update_sql = """
+                        UPDATE alert_recipient
+                        SET status = :status,
+                            delivered_at = CASE WHEN :status = 'delivered' THEN :status_time ELSE delivered_at END,
+                            read_at = CASE WHEN :status = 'read' THEN :status_time ELSE read_at END,
+                            error_message = COALESCE(:err_msg, error_message)
+                        WHERE channel = 'whatsapp'
+                          AND (recipient_id = :recipient_id OR recipient_id = :e164_recipient)
+                    """
+                    e164_recipient = f"+{recipient_id}" if not recipient_id.startswith("+") else recipient_id
+                    await db.execute(
+                        text(update_sql),
+                        {
+                            "status": status,
+                            "status_time": status_time,
+                            "err_msg": err_msg,
+                            "recipient_id": recipient_id,
+                            "e164_recipient": e164_recipient,
+                        },
+                    )
+                    updated_count += 1
+            # Process inbound messages (replies, feedback)
+            messages = value.get("messages", [])
+            for msg in messages:
+                from_num = msg.get("from")
+                msg_type = msg.get("type")
+                logger.info("whatsapp_inbound_message", sender=from_num, type=msg_type)
+    await db.commit()
+    return {"status": "ok", "updated_statuses": updated_count}
+
+
+# ----- Alert Recipient Persistence & Queries -----
+@app.get(
+    f"{settings.API_PREFIX}/alerts/{{alert_id}}/recipients",
+    response_model=List[AlertRecipientRead],
+    tags=["Notifications"],
+    dependencies=[Depends(require_role("admin"))],
+)
+async def get_alert_recipients(
+    alert_id: UUID,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Get delivery status for all recipients of an alert."""
+    from sqlalchemy import text
+
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT id, alert_id, recipient_type, recipient_id, channel,
+                       sent_at, delivered_at, read_at, status, error_message,
+                       COALESCE(retry_count, 0) AS retry_count
+                FROM alert_recipient
+                WHERE alert_id = :alert_id
+                ORDER BY created_at
+                """
+            ),
+            {"alert_id": alert_id},
+        )
+    ).mappings().all()
+    return [AlertRecipientRead.model_validate(dict(r)) for r in rows]
+
+
+@app.patch(
+    f"{settings.API_PREFIX}/alerts/{{alert_id}}/recipients/{{recipient_id}}/status",
+    tags=["Notifications"],
+    dependencies=[Depends(require_role("admin"))],
+)
+async def update_recipient_status(
+    alert_id: UUID,
+    recipient_id: str,
+    body: AlertRecipientStatusUpdateRequest,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Manually update delivery status of an alert recipient."""
+    from sqlalchemy import text
+
+    result = await db.execute(
+        text(
+            """
+            UPDATE alert_recipient
+            SET status = :status,
+                error_message = :error_message,
+                delivered_at = COALESCE(:delivered_at, delivered_at),
+                read_at = COALESCE(:read_at, read_at)
+            WHERE alert_id = :alert_id AND recipient_id = :recipient_id
+            RETURNING id, status
+            """
+        ),
+        {
+            "alert_id": alert_id,
+            "recipient_id": recipient_id,
+            "status": body.status,
+            "error_message": body.error_message,
+            "delivered_at": body.delivered_at,
+            "read_at": body.read_at,
+        },
+    )
+    row = result.mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Alert recipient record not found")
+    await db.commit()
+    return {"status": "updated", "id": str(row["id"]), "recipient_status": row["status"]}
+
+
+@app.post(
+    f"{settings.API_PREFIX}/alerts/{{alert_id}}/recipients/retry",
+    tags=["Notifications"],
+    dependencies=[Depends(require_role("admin"))],
+)
+async def retry_failed_alert_recipients(
+    alert_id: UUID,
+    req: AlertRecipientRetryRequest,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Retry deliveries that failed for an alert."""
+    from sqlalchemy import text
+
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT id, alert_id, recipient_type, recipient_id, channel, retry_count
+                FROM alert_recipient
+                WHERE alert_id = :alert_id
+                  AND status = 'failed'
+                  AND (:channels_empty = TRUE OR channel = ANY(:channels))
+                  AND (:recipients_empty = TRUE OR recipient_id = ANY(:recipients))
+                """
+            ),
+            {
+                "alert_id": alert_id,
+                "channels": req.channels or [],
+                "channels_empty": not bool(req.channels),
+                "recipients": req.recipient_ids or [],
+                "recipients_empty": not bool(req.recipient_ids),
+            },
+        )
+    ).mappings().all()
+
+    retried = []
+    for r in rows:
+        await db.execute(
+            text(
+                """
+                UPDATE alert_recipient
+                SET status = 'pending',
+                    retry_count = COALESCE(retry_count, 0) + 1,
+                    error_message = NULL
+                WHERE id = :id
+                """
+            ),
+            {"id": r["id"]},
+        )
+        retried.append(str(r["id"]))
+    await db.commit()
+    logger.info("alert_recipients_retry_queued", alert_id=str(alert_id), count=len(retried))
+    return {"alert_id": str(alert_id), "retried_count": len(retried), "retried_ids": retried}
 
 
 @app.get(f"{settings.API_PREFIX}/free-channels", dependencies=[Depends(require_role("admin"))])

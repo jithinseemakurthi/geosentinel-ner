@@ -11,14 +11,14 @@ import { acknowledgeAlert } from '@/services/api'
 import type { Alert } from '@/types'
 
 const SEV_TONE: Record<string, { chip: string; bar: string; text: string }> = {
-  evacuation: { chip: 'badge-evacuation', bar: '#f85149', text: 'text-red-400' },
-  warning:    { chip: 'badge-warning',    bar: '#fc8d59', text: 'text-orange-400' },
-  watch:      { chip: 'badge-watch',      bar: '#d29922', text: 'text-yellow-300' },
-  advisory:   { chip: 'badge-advisory',   bar: '#58a6ff', text: 'text-sky-400' },
+  evacuation: { chip: 'badge-evacuation', bar: '#EF4444', text: 'text-red-400' },
+  warning:    { chip: 'badge-warning',    bar: '#F97316', text: 'text-orange-400' },
+  watch:      { chip: 'badge-watch',      bar: '#EAB308', text: 'text-yellow-300' },
+  advisory:   { chip: 'badge-advisory',   bar: '#38BDF8', text: 'text-sky-400' },
 }
 
 const SEV_COLOR: Record<string, string> = {
-  evacuation: '#f85149', warning: '#fc8d59', watch: '#d29922', advisory: '#58a6ff',
+  evacuation: '#EF4444', warning: '#F97316', watch: '#EAB308', advisory: '#38BDF8',
 }
 
 function AlertDetail({
@@ -118,16 +118,16 @@ function AlertDetail({
                 <AreaChart data={chartData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
                   <defs>
                     <linearGradient id="riskGradient" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#f85149" stopOpacity={0.4} />
-                      <stop offset="100%" stopColor="#f85149" stopOpacity={0} />
+                      <stop offset="0%" stopColor="#EF4444" stopOpacity={0.4} />
+                      <stop offset="100%" stopColor="#EF4444" stopOpacity={0} />
                     </linearGradient>
                     <linearGradient id="riskGradient2" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#fc8d59" stopOpacity={0.4} />
-                      <stop offset="100%" stopColor="#fc8d59" stopOpacity={0} />
+                      <stop offset="0%" stopColor="#F97316" stopOpacity={0.4} />
+                      <stop offset="100%" stopColor="#F97316" stopOpacity={0} />
                     </linearGradient>
                     <linearGradient id="riskGradient3" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#d29922" stopOpacity={0.4} />
-                      <stop offset="100%" stopColor="#d29922" stopOpacity={0} />
+                      <stop offset="0%" stopColor="#EAB308" stopOpacity={0.4} />
+                      <stop offset="100%" stopColor="#EAB308" stopOpacity={0} />
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
@@ -154,7 +154,7 @@ function AlertDetail({
                   <Area
                     type="monotone"
                     dataKey="probability"
-                    stroke="#f85149"
+                    stroke="#EF4444"
                     strokeWidth={2}
                     fillOpacity={1}
                     fill="url(#riskGradient)"
@@ -162,7 +162,7 @@ function AlertDetail({
                   <Area
                     type="monotone"
                     dataKey="m1"
-                    stroke="#fc8d59"
+                    stroke="#F97316"
                     strokeWidth={1}
                     strokeDasharray="4 4"
                     fillOpacity={0}
@@ -170,7 +170,7 @@ function AlertDetail({
                   <Area
                     type="monotone"
                     dataKey="m2"
-                    stroke="#d29922"
+                    stroke="#EAB308"
                     strokeWidth={1}
                     strokeDasharray="4 4"
                     fillOpacity={0}

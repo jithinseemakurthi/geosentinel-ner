@@ -28,7 +28,7 @@ export default function SensorDetail({ station, onClose }: Props) {
       markerRef.current = null
     }
     const el = document.createElement('div')
-    el.style.cssText = `width:18px;height:18px;border-radius:50%;background:${station.status === 'online' ? '#3fb950' : station.status === 'maintenance' ? '#d29922' : '#f85149'};border:3px solid #0d1117`
+    el.style.cssText = `width:18px;height:18px;border-radius:50%;background:${station.status === 'online' ? '#22C55E' : station.status === 'maintenance' ? '#EAB308' : '#EF4444'};border:3px solid #0d1117`
     const marker = new maplibregl.Marker({ element: el })
       .setLngLat([cc.lng, cc.lat])
       .setPopup(new maplibregl.Popup({ offset: 12 }).setHTML(`<b>${station.code}</b><br/>${station.lastReading}`))
@@ -104,15 +104,15 @@ export default function SensorDetail({ station, onClose }: Props) {
                 <AreaChart data={history} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
                   <defs>
                     <linearGradient id="sensorGradient" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#58a6ff" stopOpacity={0.4} />
-                      <stop offset="100%" stopColor="#58a6ff" stopOpacity={0} />
+                      <stop offset="0%" stopColor="#38BDF8" stopOpacity={0.4} />
+                      <stop offset="100%" stopColor="#38BDF8" stopOpacity={0} />
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
                   <XAxis dataKey="time" tick={{ fill: '#8b949e', fontSize: 11 }} tickLine={false} axisLine={false} interval="preserveStartEnd" tickFormatter={t => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} />
                   <YAxis tick={{ fill: '#8b949e', fontSize: 11 }} tickLine={false} axisLine={false} width={50} />
                   <Tooltip contentStyle={{ backgroundColor: '#161b22', border: '1px solid #30363d', borderRadius: '8px', color: '#e6edf3' }} />
-                  <Area type="monotone" dataKey="value" stroke="#58a6ff" strokeWidth={2} fillOpacity={1} fill="url(#sensorGradient)" />
+                  <Area type="monotone" dataKey="value" stroke="#38BDF8" strokeWidth={2} fillOpacity={1} fill="url(#sensorGradient)" />
                 </AreaChart>
               </ResponsiveContainer>
               <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
@@ -149,15 +149,15 @@ export default function SensorDetail({ station, onClose }: Props) {
                 <AreaChart data={generateBatteryHistory()} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
                   <defs>
                     <linearGradient id="batteryGradient" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#3fb950" stopOpacity={0.4} />
-                      <stop offset="100%" stopColor="#3fb950" stopOpacity={0} />
+                      <stop offset="0%" stopColor="#22C55E" stopOpacity={0.4} />
+                      <stop offset="100%" stopColor="#22C55E" stopOpacity={0} />
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
                   <XAxis dataKey="day" tick={{ fill: '#8b949e', fontSize: 11 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
                   <YAxis domain={[0, 100]} tick={{ fill: '#8b949e', fontSize: 11 }} tickLine={false} axisLine={false} width={30} />
                   <Tooltip contentStyle={{ backgroundColor: '#161b22', border: '1px solid #30363d', borderRadius: '8px', color: '#e6edf3' }} />
-                  <Area type="monotone" dataKey="battery" stroke="#3fb950" strokeWidth={2} fillOpacity={1} fill="url(#batteryGradient)" />
+                  <Area type="monotone" dataKey="battery" stroke="#22C55E" strokeWidth={2} fillOpacity={1} fill="url(#batteryGradient)" />
                 </AreaChart>
               </ResponsiveContainer>
             </div>

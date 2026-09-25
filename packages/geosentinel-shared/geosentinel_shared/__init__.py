@@ -21,6 +21,15 @@ from .database import (
     get_ts_session,
     init_db,
 )
+from .events import (
+    EventTopics,
+    GeoSentinelEvent,
+    InMemoryEventBus,
+    KafkaConsumerClient,
+    KafkaProducerClient,
+    event_producer,
+    get_in_memory_event_bus,
+)
 from .logging import LoggerMixin, configure_logging, get_logger, log_request_response
 from .schemas import *  # noqa: F401,F403
 
@@ -46,6 +55,13 @@ __all__ = [
     "verify_token",
     "check_permission",
     "TokenPayload",
+    "EventTopics",
+    "GeoSentinelEvent",
+    "KafkaProducerClient",
+    "KafkaConsumerClient",
+    "event_producer",
+    "get_in_memory_event_bus",
+    "InMemoryEventBus",
 ]
 
 

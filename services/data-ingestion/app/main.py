@@ -564,17 +564,18 @@ async def get_ingestion_status(task_id: UUID):
 @app.get("/weather/current/{district}")
 async def current_weather(district: str):
     """Live keyless weather summary for a district (Open-Meteo, no DB)."""
-    if district not in DISTRICT_COORDS:
+    canonical = next((name for name in DISTRICT_COORDS if name.casefold() == district.casefold()), None)
+    if canonical is None:
         raise HTTPException(status_code=404, detail=f"Unknown district: {district}")
     collector = OpenMeteoCollector()
-    payload = await collector.fetch_district_forecast(district)
+    payload = await collector.fetch_district_forecast(canonical)
     now = datetime.now(timezone.utc)
     rows = payload["rows"]
     past24 = [r for r in rows if now - timedelta(hours=24) <= r["time"] <= now]
     next24 = [r for r in rows if now < r["valid_to"] <= now + timedelta(hours=24)]
     latest_obs = max(past24, key=lambda r: r["time"], default=None)
     return {
-        "district": district,
+        "district": canonical,
         "source": WEATHER_PROVIDER_LABEL,
         "observed_rainfall_24h_mm": round(sum(r["rainfall_mm"] for r in past24), 2),
         "forecast_rainfall_next_24h_mm": round(sum(r["rainfall_mm"] for r in next24), 2),

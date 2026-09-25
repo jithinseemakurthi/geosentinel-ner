@@ -1,0 +1,10 @@
+# Build context for the web-dashboard image.
+# node_modules must NEVER enter the image: npm ci installs Linux-native
+# binaries, and a Windows host's node_modules would shadow them (node.exe not found).
+node_modules
+dist
+coverage
+.vite
+*.log
+.env
+.env.local

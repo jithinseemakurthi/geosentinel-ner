@@ -48,7 +48,7 @@ export function ReportDetail({
       markerRef.current = null
     }
     const el = document.createElement('div')
-    el.style.cssText = 'width:18px;height:18px;border-radius:50%;background:#58a6ff;border:3px solid #0d1117;box-shadow:0 0 12px #58a6ff'
+    el.style.cssText = 'width:18px;height:18px;border-radius:50%;background:#38BDF8;border:3px solid #0d1117;box-shadow:0 0 12px #38BDF8'
     const marker = new maplibregl.Marker({ element: el })
       .setLngLat([cc.lng, cc.lat])
       .setPopup(new maplibregl.Popup({ offset: 12 }).setHTML(`<b>${report.code}</b><br/>${report.reportType} · ${report.severity}`))

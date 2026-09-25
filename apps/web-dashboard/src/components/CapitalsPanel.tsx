@@ -44,39 +44,59 @@ export function CapitalsPanel() {
 
   useEffect(() => {
     let cancelled = false
-    const poll = async () => {
-      const entries = await Promise.all(
-        NER_CAPITALS.map(async (cap) => {
-          const [w, n] = await Promise.all([
-            fetchLiveWeather(cap.name),
-            fetchImdNowcast(cap.imdQuery),
-          ])
-          const row: CapitalData = {
-            id: cap.id,
-            name: cap.name,
-            state: cap.state,
-            temp: w?.temperature_c ?? null,
-            humidity: w?.humidity_pct ?? null,
-            observedRain: w?.observed_rainfall_24h_mm ?? null,
-            forecastRain: w?.forecast_rainfall_next_24h_mm ?? null,
-            weatherSource: w?.source ?? null,
-            imdAlerts: n?.alerts_total ?? null,
-            imdColor: typeof n?.Color === 'number' ? n.Color : null,
-            imdMessage: n?.message || n?.impact || '',
-          }
-          return [cap.id, row] as const
-        }),
-      )
-      if (!cancelled) {
-        setData(Object.fromEntries(entries))
-        setLoadedOnce(true)
+    // Stagger fetches to avoid 16 parallel requests blocking map tiles / JS thread
+    const fetchOne = async (cap: typeof NER_CAPITALS[number]): Promise<[string, CapitalData]> => {
+      const [weatherResult, nowcastResult] = await Promise.allSettled([
+        fetchLiveWeather(cap.name),
+        fetchImdNowcast(cap.imdQuery),
+      ])
+      const w = weatherResult.status === 'fulfilled' ? weatherResult.value : null
+      const n = nowcastResult.status === 'fulfilled' ? nowcastResult.value : null
+      const row: CapitalData = {
+        id: cap.id,
+        name: cap.name,
+        state: cap.state,
+        temp: w?.temperature_c ?? null,
+        humidity: w?.humidity_pct ?? null,
+        observedRain: w?.observed_rainfall_24h_mm ?? null,
+        forecastRain: w?.forecast_rainfall_next_24h_mm ?? null,
+        weatherSource: w?.source ?? null,
+        imdAlerts: n?.alerts_total ?? null,
+        imdColor: typeof n?.Color === 'number' ? n.Color : null,
+        imdMessage: n?.message || n?.impact || '',
       }
+      return [cap.id, row]
     }
+
+    const poll = async () => {
+      // Sequential with 90ms gap — populates cards incrementally so UI feels instant
+      for (let i = 0; i < NER_CAPITALS.length; i++) {
+        if (cancelled) return
+        const cap = NER_CAPITALS[i]
+        try {
+          const entry = await fetchOne(cap)
+          if (cancelled) return
+          setData((prev) => ({ ...prev, [entry[0]]: entry[1] }))
+          if (i === 0) setLoadedOnce(true)
+        } catch {
+          /* per-capital failure is non-fatal — demo fallback in fetch ensures row */
+        }
+        if (i < NER_CAPITALS.length - 1) await new Promise((r) => setTimeout(r, 90))
+      }
+      if (!cancelled) setLoadedOnce(true)
+    }
+
     void poll()
-    const id = setInterval(poll, 60_000)
+    // Respect cache TTL (55s) + avoid hammering when tab hidden
+    const id = setInterval(() => {
+      if (document.visibilityState === 'visible') void poll()
+    }, 60_000)
+    const onVis = () => { if (document.visibilityState === 'visible') void poll() }
+    document.addEventListener('visibilitychange', onVis)
     return () => {
       cancelled = true
       clearInterval(id)
+      document.removeEventListener('visibilitychange', onVis)
     }
   }, [])
 
