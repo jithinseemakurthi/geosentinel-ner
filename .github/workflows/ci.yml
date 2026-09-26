@@ -14,12 +14,13 @@ jobs:
     name: Python lint & tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10
         with:
           python-version: "3.11"
+          activate-environment: true
 
       - name: Install dependencies
         run: uv pip install -r requirements-dev.txt
@@ -37,9 +38,9 @@ jobs:
       run:
         working-directory: apps/web-dashboard
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -61,7 +62,7 @@ jobs:
     name: Validate docker-compose.yml
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Validate compose file
         run: |
