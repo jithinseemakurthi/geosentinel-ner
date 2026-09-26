@@ -465,8 +465,6 @@ class WSMessage(BaseSchema):
     payload: Dict[str, Any]
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    model_config = ConfigDict(json_encoders={datetime: lambda v: v.isoformat()})
-
 
 # -----------------------------------------------------------------------------
 # Health check

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import maplibregl from 'maplibre-gl'
+import * as maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { submitReport, uploadReportMedia, reverseGeocode } from '@/services/api'
 import type { CitizenReport } from '@/types'

@@ -14,7 +14,7 @@ export default function LottieLoader({ src, className = 'h-24 w-24' }: { src?: s
         if (!el.current) return
         const resp = src ? await fetch(src).then(r => r.json()) : null
         player = lottie.loadAnimation({ container: el.current, renderer: 'svg', loop: true, autoplay: true, animationData: resp ?? undefined })
-      } catch (err) {
+      } catch {
         // lottie not available or fetch failed — ignore, fallback UI remains
       }
     }

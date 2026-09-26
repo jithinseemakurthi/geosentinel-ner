@@ -229,21 +229,24 @@ If delivery fails, GeoSentinel now surfaces textbee's HTTP response verbatim in
 the error/logs (e.g. device offline or unregistered), so setup problems are
 easy to spot. Your mobile carrier's normal SMS terms still apply.
 
-## ML Models (roadmap)
+## ML pipeline status
 
-The inference API is live; models load from the registry when trained
-artefacts exist, otherwise transparent heuristics serve responses:
+Training and feature-engineering prototypes for M1/M2/M3 live under
+`ml/training` and `ml/features`. The inference API loads registered model
+artifacts when available and otherwise uses transparent heuristic fallbacks:
 
 - **M1 Susceptibility**: XGBoost on terrain + geology + historical inventory → static risk zones
 - **M2 Dynamic Risk**: Gradient Boosting + LSTM on rainfall forecast + soil moisture + antecedent indices → 24/48/72h probability
 - **M3 Report Triage**: MobileNetV3 / EfficientNet on citizen photos → crack/bulge/debris classification
 
-Training pipelines (`ml/training`, `ml/features`) are not yet implemented.
+The automated training tests currently use synthetic datasets. Validation on
+labeled regional data and publishing validated artifacts to the model registry
+remain roadmap work; heuristic output should be treated as a prototype signal.
 
 ## Roadmap
 
 - Flutter offline-first mobile app (`apps/mobile-app`)
-- ML training pipelines + MLflow model registry population
+- Regional dataset validation + MLflow model registry population
 - Terraform / Kubernetes manifests for staging & production
 - Kafka event backbone (compose profile already wired)
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import type { KeyboardEvent } from 'react'
-import maplibregl from 'maplibre-gl'
+import * as maplibregl from 'maplibre-gl'
+import type { Feature, FeatureCollection, Point } from 'geojson'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import LottieLoader from '@/components/LottieLoader'
 import { DISTRICT_COORDS, DEFAULT_CENTER } from '@/lib/districts'
@@ -157,7 +158,7 @@ export default function MapView({
     if (e.key === 'End') { e.preventDefault(); focusables[focusables.length - 1]?.focus() }
   }, [])
 
-  function alertFeatures(): GeoJSON.FeatureCollection {
+  function alertFeatures(): FeatureCollection {
     const hoursBack = Math.round((timeExtentRef.current[1] / 100) * 72)
     const cutoff = hoursBack >= 72 ? 0 : Date.now() - hoursBack * 3_600_000
     return {
@@ -177,9 +178,9 @@ export default function MapView({
               district: a.district,
             },
             geometry: { type: 'Point', coordinates: [c.lng, c.lat] },
-          } as GeoJSON.Feature
+          } as Feature
         })
-        .filter(Boolean) as GeoJSON.Feature[],
+        .filter(Boolean) as Feature[],
     }
   }
 
@@ -249,7 +250,7 @@ export default function MapView({
 
   function ensureRiskZones(map: maplibregl.Map) {
     const zones = liveRiskZones(alertsRef.current)
-    const geojson: GeoJSON.FeatureCollection = {
+    const geojson: FeatureCollection = {
       type: 'FeatureCollection',
       features: zones.map(z => ({
         type: 'Feature',
@@ -320,9 +321,9 @@ export default function MapView({
           district: report.district,
         },
         geometry: { type: 'Point', coordinates: [center.lng, center.lat] },
-      } as GeoJSON.Feature
-    }).filter(Boolean) as GeoJSON.Feature[]
-    const data: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features }
+      } as Feature
+    }).filter(Boolean) as Feature[]
+    const data: FeatureCollection = { type: 'FeatureCollection', features }
     const source = map.getSource('report-events') as maplibregl.GeoJSONSource | undefined
     if (source) {
       source.setData(data)
@@ -463,7 +464,7 @@ export default function MapView({
       const clusterId = f.properties?.cluster_id as number
       void source.getClusterExpansionZoom(clusterId).then(zoom => {
         map.easeTo({
-          center: (f.geometry as GeoJSON.Point).coordinates as [number, number],
+          center: (f.geometry as Point).coordinates as [number, number],
           zoom: zoom + 0.5,
         })
       }).catch(() => {})
@@ -477,7 +478,7 @@ export default function MapView({
       const report = reportsRef.current.find(r => r.id === id)
       if (!report) return
       // Prefer opening source URL for live internet reports, otherwise just fly to the point
-      const coords = (f.geometry as GeoJSON.Point).coordinates as [number, number]
+      const coords = (f.geometry as Point).coordinates as [number, number]
       map.flyTo({ center: coords, zoom: Math.max(map.getZoom(), 7), duration: 800 })
       // Show a lightweight popup with key fields
       const html = `<div style="font:12px system-ui; line-height:1.4; min-width:160px"><b>${(report.code||'').replace(/</g,'&lt;')}</b> <span style="border:1px solid #38bdf8; color:#38bdf8; border-radius:999px; padding:1px 6px; font-size:10px">${(report.source||'').replace(/</g,'&lt;')}</span><br/><span style="text-transform:capitalize">${report.reportType}</span> · <span style="color:${report.severity==='critical'?'#EF4444':report.severity==='high'?'#F97316':'#38BDF8'}">${report.severity}</span><br/><span style="color:#94a3b8">${(report.district||'') + ' · ' + (report.village||'')}</span><br/><span>${(report.description||'').slice(0,120).replace(/</g,'&lt;')}</span>${report.url ? `<br/><a href="${report.url}" target="_blank" rel="noreferrer" style="color:#38bdf8">Open source ↗</a>` : ''}</div>`

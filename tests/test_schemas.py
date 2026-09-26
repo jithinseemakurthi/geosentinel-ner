@@ -41,6 +41,12 @@ class TestWSMessage:
         assert before.tzinfo is not None
         assert before <= msg.timestamp.replace(tzinfo=timezone.utc) <= after
 
+    def test_timestamp_uses_pydantic_iso_json_serialization(self):
+        msg = WSMessage(type="alert", payload={"a": 1})
+        serialized = msg.model_dump(mode="json")["timestamp"]
+        assert isinstance(serialized, str)
+        assert datetime.fromisoformat(serialized.replace("Z", "+00:00")).tzinfo is not None
+
 
 class TestAlertSchemas:
     def test_alert_rule_requires_trigger_condition(self):

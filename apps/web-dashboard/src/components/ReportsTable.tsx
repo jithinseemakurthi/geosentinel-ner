@@ -201,7 +201,8 @@ export default function ReportsTable({ reports, onOpenDetail }: { reports: Citiz
                   className={`table-row hover:bg-slate-800/40 transition transform-gpu hover:-translate-y-0.5 ${expandedIds.has(r.id) ? 'sm:grid grid-cols-6 gap-4' : ''}`}
                   onClick={() => setExpandedIds(prev => {
                     const next = new Set(prev)
-                    next.has(r.id) ? next.delete(r.id) : next.add(r.id)
+                    if (next.has(r.id)) next.delete(r.id)
+                    else next.add(r.id)
                     return next
                   })}
                   onKeyDown={(e: KeyboardEvent) => {
@@ -212,7 +213,8 @@ export default function ReportsTable({ reports, onOpenDetail }: { reports: Citiz
                       e.preventDefault()
                       setExpandedIds(prev => {
                         const next = new Set(prev)
-                        next.has(r.id) ? next.delete(r.id) : next.add(r.id)
+                        if (next.has(r.id)) next.delete(r.id)
+                        else next.add(r.id)
                         return next
                       })
                     }
